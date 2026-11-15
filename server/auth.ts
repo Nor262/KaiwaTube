@@ -3,6 +3,23 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getDb, getJwtSecret, type DbUser, type UserRole } from './db';
 import { getEnvVar } from './env';
 import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
+import {
+  SlidingWindowRateLimiter,
+  enforceRateLimit,
+  escapeLikePattern,
+  getClientIp,
+  parsePositiveIntId,
+  sanitizeText,
+} from './security';
+
+const JWT_ISSUER = 'kaiwatube';
+const JWT_AUDIENCE = 'kaiwatube-client';
+const MAX_PASSWORD_LENGTH = 128;
+
+const loginIpLimiter = new SlidingWindowRateLimiter(15, 15 * 60 * 1000);
+const loginAccountLimiter = new SlidingWindowRateLimiter(10, 15 * 60 * 1000);
+const registerIpLimiter = new SlidingWindowRateLimiter(8, 30 * 60 * 1000);
+const claimAdminIpLimiter = new SlidingWindowRateLimiter(5, 30 * 60 * 1000);
 
 export interface AuthUser {
   id: number;
@@ -49,9 +66,18 @@ function fromBase64Url(input: string): string {
 }
 
 function signToken(userId: number): string {
+  const nowSec = Math.floor(Date.now() / 1000);
   const header = toBase64Url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const exp = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 30; // 30 days
-  const payload = toBase64Url(JSON.stringify({ sub: userId, exp }));
+  const exp = nowSec + 60 * 60 * 24 * 14; // 14 days
+  const payload = toBase64Url(
+    JSON.stringify({
+      sub: userId,
+      iss: JWT_ISSUER,
+      aud: JWT_AUDIENCE,
+      iat: nowSec,
+      exp,
+    })
+  );
   const data = `${header}.${payload}`;
   const sig = crypto
     .createHmac('sha256', getJwtSecret())
@@ -62,10 +88,23 @@ function signToken(userId: number): string {
 
 function verifyToken(token: string): { userId: number } | null {
   try {
+    if (!token || token.length > 2048) return null;
     const parts = token.split('.');
     if (parts.length !== 3) return null;
-    const [header, payload, sigPart] = parts;
-    const data = `${header}.${payload}`;
+    const [headerB64, payloadB64, sigPart] = parts;
+    if (!headerB64 || !payloadB64 || !sigPart) return null;
+
+    const parsedHeader = JSON.parse(fromBase64Url(headerB64));
+    if (
+      !parsedHeader ||
+      typeof parsedHeader !== 'object' ||
+      parsedHeader.alg !== 'HS256' ||
+      (parsedHeader.typ !== undefined && parsedHeader.typ !== 'JWT')
+    ) {
+      return null;
+    }
+
+    const data = `${headerB64}.${payloadB64}`;
     const expectedSig = toBase64Url(
       crypto.createHmac('sha256', getJwtSecret()).update(data).digest()
     );
@@ -74,10 +113,27 @@ function verifyToken(token: string): { userId: number } | null {
     if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       return null;
     }
-    const decoded = JSON.parse(fromBase64Url(payload));
-    if (!decoded?.sub || typeof decoded.exp !== 'number') return null;
-    if (decoded.exp < Math.floor(Date.now() / 1000)) return null;
-    return { userId: Number(decoded.sub) };
+
+    const decoded = JSON.parse(fromBase64Url(payloadB64));
+    if (!decoded || typeof decoded !== 'object') return null;
+    if (
+      typeof decoded.sub !== 'number' ||
+      !Number.isSafeInteger(decoded.sub) ||
+      decoded.sub <= 0
+    ) {
+      return null;
+    }
+    if (decoded.iss !== JWT_ISSUER || decoded.aud !== JWT_AUDIENCE) {
+      return null;
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (typeof decoded.exp !== 'number' || !Number.isFinite(decoded.exp) || decoded.exp <= nowSec) {
+      return null;
+    }
+    if (typeof decoded.iat === 'number' && decoded.iat > nowSec + 60) {
+      return null;
+    }
+    return { userId: decoded.sub };
   } catch {
     return null;
   }
@@ -118,13 +174,25 @@ export async function handleAuthRoutes(
 ): Promise<boolean> {
   const db = getDb();
   const method = (req.method || 'GET').toUpperCase();
+  const clientIp = getClientIp(req);
 
   if (pathname === '/api/auth/register' && method === 'POST') {
-    const body = await readJsonBody(req);
+    if (
+      !enforceRateLimit(
+        registerIpLimiter,
+        `reg:${clientIp}`,
+        res,
+        'Bạn đã đăng ký quá nhiều lần. Vui lòng thử lại sau ít phút.'
+      )
+    ) {
+      return true;
+    }
+
+    const body = await readJsonBody(req, 16 * 1024);
     const rawUsername = String(body.username || '').trim().toLowerCase();
-    const displayName = String(body.displayName || body.username || '').trim();
-    const password = String(body.password || '');
-    const adminSecret = String(body.adminSecret || '').trim();
+    const displayName = sanitizeText(body.displayName || rawUsername, 80) || rawUsername;
+    const password = typeof body.password === 'string' ? body.password : String(body.password || '');
+    const adminSecret = sanitizeText(body.adminSecret || '', 256);
 
     if (!/^[a-z0-9_.-]{3,32}$/.test(rawUsername)) {
       sendJson(res, 400, {
@@ -132,13 +200,23 @@ export async function handleAuthRoutes(
       });
       return true;
     }
-    if (password.length < 6) {
-      sendJson(res, 400, { error: 'Mật khẩu phải có ít nhất 6 ký tự.' });
+    if (password.length < 6 || password.length > MAX_PASSWORD_LENGTH) {
+      sendJson(res, 400, { error: 'Mật khẩu phải dài từ 6 đến 128 ký tự.' });
       return true;
     }
 
     let role: UserRole = 'user';
     if (adminSecret) {
+      if (
+        !enforceRateLimit(
+          claimAdminIpLimiter,
+          `claim:${clientIp}`,
+          res,
+          'Thử mã kích hoạt Admin quá nhiều lần. Vui lòng thử lại sau 30 phút.'
+        )
+      ) {
+        return true;
+      }
       const configuredSecret = getEnvVar('ADMIN_SECRET');
       if (!configuredSecret) {
         sendJson(res, 403, { error: 'Máy chủ chưa cấu hình ADMIN_SECRET.' });
@@ -164,7 +242,7 @@ export async function handleAuthRoutes(
       .prepare(
         'INSERT INTO users (username, display_name, password_hash, role) VALUES (?, ?, ?, ?)'
       )
-      .run(rawUsername, displayName || rawUsername, pwHash, role);
+      .run(rawUsername, displayName, pwHash, role);
 
     const created = db
       .prepare('SELECT id, username, display_name, role, created_at FROM users WHERE id = ?')
@@ -176,12 +254,34 @@ export async function handleAuthRoutes(
   }
 
   if (pathname === '/api/auth/login' && method === 'POST') {
-    const body = await readJsonBody(req);
-    const rawUsername = String(body.username || '').trim().toLowerCase();
-    const password = String(body.password || '');
+    if (
+      !enforceRateLimit(
+        loginIpLimiter,
+        `login:${clientIp}`,
+        res,
+        'Đăng nhập sai hoặc thao tác quá nhiều lần. Vui lòng thử lại sau ít phút.'
+      )
+    ) {
+      return true;
+    }
 
-    if (!rawUsername || !password) {
-      sendJson(res, 400, { error: 'Vui lòng nhập tên đăng nhập và mật khẩu.' });
+    const body = await readJsonBody(req, 16 * 1024);
+    const rawUsername = String(body.username || '').trim().toLowerCase();
+    const password = typeof body.password === 'string' ? body.password : String(body.password || '');
+
+    if (!rawUsername || !password || rawUsername.length > 64 || password.length > MAX_PASSWORD_LENGTH) {
+      sendJson(res, 400, { error: 'Vui lòng nhập tên đăng nhập và mật khẩu hợp lệ.' });
+      return true;
+    }
+
+    if (
+      !enforceRateLimit(
+        loginAccountLimiter,
+        `login-acct:${clientIp}:${rawUsername}`,
+        res,
+        'Tài khoản đang tạm giới hạn do thử đăng nhập nhiều lần. Vui lòng đợi ít phút.'
+      )
+    ) {
       return true;
     }
 
@@ -215,8 +315,19 @@ export async function handleAuthRoutes(
       sendJson(res, 401, { error: 'Bạn cần đăng nhập trước.' });
       return true;
     }
-    const body = await readJsonBody(req);
-    const adminSecret = String(body.adminSecret || '').trim();
+    if (
+      !enforceRateLimit(
+        claimAdminIpLimiter,
+        `claim:${clientIp}:${user.id}`,
+        res,
+        'Thử mã kích hoạt Admin quá nhiều lần. Vui lòng thử lại sau 30 phút.'
+      )
+    ) {
+      return true;
+    }
+
+    const body = await readJsonBody(req, 8 * 1024);
+    const adminSecret = sanitizeText(body.adminSecret || '', 256);
     const configuredSecret = getEnvVar('ADMIN_SECRET');
     if (!configuredSecret) {
       sendJson(res, 403, { error: 'Máy chủ chưa cấu hình ADMIN_SECRET.' });
@@ -245,16 +356,17 @@ export async function handleAuthRoutes(
     }
 
     const url = getRequestUrl(req);
-    const q = (url.searchParams.get('q') || '').trim().toLowerCase();
+    const q = sanitizeText(url.searchParams.get('q') || '', 64).toLowerCase();
+    const escapedQ = q ? `%${escapeLikePattern(q)}%` : '';
     const rows = (
       q
         ? db
             .prepare(
               `SELECT id, username, display_name, role, created_at FROM users
-               WHERE username LIKE ? OR LOWER(display_name) LIKE ?
+               WHERE username LIKE ? ESCAPE '\\' OR LOWER(display_name) LIKE ? ESCAPE '\\'
                ORDER BY created_at DESC LIMIT 100`
             )
-            .all(`%${q}%`, `%${q}%`)
+            .all(escapedQ, escapedQ)
         : db
             .prepare(
               'SELECT id, username, display_name, role, created_at FROM users ORDER BY created_at DESC LIMIT 100'
@@ -266,21 +378,21 @@ export async function handleAuthRoutes(
     return true;
   }
 
-  if (pathname.startsWith('/api/admin/users/') && pathname.endsWith('/role') && method === 'PATCH') {
+  const roleMatch = pathname.match(/^\/api\/admin\/users\/([1-9]\d*)\/role$/);
+  if (roleMatch && method === 'PATCH') {
     const actor = getAuthUser(req);
     if (!actor || actor.role !== 'admin') {
       sendJson(res, 403, { error: 'Chỉ Admin mới có quyền phân quyền tài khoản.' });
       return true;
     }
 
-    const parts = pathname.split('/');
-    const targetId = Number(parts[4]);
-    if (!Number.isInteger(targetId) || targetId <= 0) {
+    const targetId = parsePositiveIntId(roleMatch[1]);
+    if (!targetId) {
       sendJson(res, 400, { error: 'ID tài khoản không hợp lệ.' });
       return true;
     }
 
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, 8 * 1024);
     const nextRole = String(body.role || '') as UserRole;
     if (!['user', 'contributor', 'admin'].includes(nextRole)) {
       sendJson(res, 400, { error: 'Vai trò không hợp lệ (chọn user, contributor hoặc admin).' });

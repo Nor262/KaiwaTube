@@ -2,6 +2,21 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getDb } from './db';
 import { getAuthUser } from './auth';
 import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
+import { isSafeHttpUrl, isValidItemId, sanitizeText } from './security';
+
+const ALLOWED_FAVORITE_TYPES = new Set(['video', 'playlist', 'anime']);
+
+function safeParseMetaObject(raw: string | null | undefined): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed;
+    }
+    return {};
+  } catch {
+    return {};
+  }
+}
 
 export async function handleFavoriteRoutes(
   req: IncomingMessage,
@@ -22,18 +37,23 @@ export async function handleFavoriteRoutes(
 
   if (method === 'GET') {
     const typeFilter = (url.searchParams.get('type') || '').trim();
+    if (typeFilter && !ALLOWED_FAVORITE_TYPES.has(typeFilter)) {
+      sendJson(res, 400, { error: 'Loại mục yêu thích không hợp lệ.' });
+      return true;
+    }
+
     const rows = (
       typeFilter
         ? db
             .prepare(
               `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
-               FROM favorites WHERE user_id = ? AND item_type = ? ORDER BY created_at DESC`
+               FROM favorites WHERE user_id = ? AND item_type = ? ORDER BY created_at DESC LIMIT 500`
             )
             .all(user.id, typeFilter)
         : db
             .prepare(
               `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
-               FROM favorites WHERE user_id = ? ORDER BY created_at DESC`
+               FROM favorites WHERE user_id = ? ORDER BY created_at DESC LIMIT 500`
             )
             .all(user.id)
     ) as any[];
@@ -44,14 +64,8 @@ export async function handleFavoriteRoutes(
       itemId: r.item_id,
       title: r.title,
       subtitle: r.subtitle || '',
-      thumbnail: r.thumbnail || '',
-      meta: (() => {
-        try {
-          return JSON.parse(r.meta_json || '{}');
-        } catch {
-          return {};
-        }
-      })(),
+      thumbnail: isSafeHttpUrl(r.thumbnail || ''),
+      meta: safeParseMetaObject(r.meta_json),
       createdAt: r.created_at,
     }));
 
@@ -60,16 +74,29 @@ export async function handleFavoriteRoutes(
   }
 
   if (method === 'POST') {
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, 32 * 1024);
     const itemType = String(body.itemType || '').trim();
     const itemId = String(body.itemId || '').trim();
-    const title = String(body.title || '').trim();
-    const subtitle = String(body.subtitle || '').trim();
-    const thumbnail = String(body.thumbnail || '').trim();
-    const metaJson = JSON.stringify(body.meta || {});
+    const title = sanitizeText(body.title, 200);
+    const subtitle = sanitizeText(body.subtitle, 120);
+    const rawThumbnail = String(body.thumbnail || '').trim();
+    const safeThumbnail = rawThumbnail ? isSafeHttpUrl(rawThumbnail) : '';
 
-    if (!['video', 'playlist', 'anime'].includes(itemType) || !itemId || !title) {
-      sendJson(res, 400, { error: 'Thiếu thông tin itemType, itemId hoặc title.' });
+    if (rawThumbnail && !safeThumbnail) {
+      sendJson(res, 400, { error: 'URL hình ảnh thumbnail không hợp lệ.' });
+      return true;
+    }
+
+    if (!ALLOWED_FAVORITE_TYPES.has(itemType) || !isValidItemId(itemId) || !title) {
+      sendJson(res, 400, { error: 'Thiếu hoặc sai định dạng itemType, itemId hoặc title.' });
+      return true;
+    }
+
+    const metaVal =
+      body.meta && typeof body.meta === 'object' && !Array.isArray(body.meta) ? body.meta : {};
+    const metaJson = JSON.stringify(metaVal);
+    if (metaJson.length > 8192) {
+      sendJson(res, 400, { error: 'Dữ liệu meta quá lớn.' });
       return true;
     }
 
@@ -81,7 +108,7 @@ export async function handleFavoriteRoutes(
          subtitle = excluded.subtitle,
          thumbnail = excluded.thumbnail,
          meta_json = excluded.meta_json`
-    ).run(user.id, itemType, itemId, title, subtitle, thumbnail, metaJson);
+    ).run(user.id, itemType, itemId, title, subtitle, safeThumbnail, metaJson);
 
     const saved = db
       .prepare(
@@ -97,8 +124,8 @@ export async function handleFavoriteRoutes(
         itemId: saved.item_id,
         title: saved.title,
         subtitle: saved.subtitle || '',
-        thumbnail: saved.thumbnail || '',
-        meta: JSON.parse(saved.meta_json || '{}'),
+        thumbnail: isSafeHttpUrl(saved.thumbnail || ''),
+        meta: safeParseMetaObject(saved.meta_json),
         createdAt: saved.created_at,
       },
     });
@@ -108,8 +135,8 @@ export async function handleFavoriteRoutes(
   if (method === 'DELETE') {
     const itemType = (url.searchParams.get('type') || '').trim();
     const itemId = (url.searchParams.get('id') || '').trim();
-    if (!itemType || !itemId) {
-      sendJson(res, 400, { error: 'Thiếu type hoặc id để xóa.' });
+    if (!ALLOWED_FAVORITE_TYPES.has(itemType) || !isValidItemId(itemId)) {
+      sendJson(res, 400, { error: 'Tham số type hoặc id không hợp lệ.' });
       return true;
     }
     db.prepare(

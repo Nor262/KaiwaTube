@@ -1,3 +1,5 @@
+import { BoundedMemoryCache, sanitizeAiText } from '../utils/aiSecurity';
+
 export interface KanjiInfo {
   type: 'kanji';
   kanji: string;
@@ -29,7 +31,7 @@ export interface ComprehensiveHoverData {
   singleChar?: KanjiInfo | null;
 }
 
-const memoryCache = new Map<string, any>();
+const memoryCache = new BoundedMemoryCache<string, any>(500);
 
 export function updateCachedKanjiMnemonic(
   kanji: string,
@@ -48,13 +50,16 @@ export function updateCachedKanjiMnemonic(
 }
 
 export async function lookupKanji(char: string): Promise<KanjiInfo | null> {
-  const cacheKey = `kanji:${char}`;
-  if (memoryCache.has(cacheKey)) {
-    return memoryCache.get(cacheKey);
+  const safeChar = sanitizeAiText(char, 4);
+  if (!safeChar) return null;
+  const cacheKey = `kanji:${safeChar}`;
+  const cached = memoryCache.get(cacheKey);
+  if (cached) {
+    return cached;
   }
 
   try {
-    const res = await fetch(`/api/kanji?q=${encodeURIComponent(char)}&type=kanji`);
+    const res = await fetch(`/api/kanji?q=${encodeURIComponent(safeChar)}&type=kanji`);
     if (!res.ok) return null;
     const data = await res.json();
     if (data && !data.notFound) {
@@ -68,13 +73,16 @@ export async function lookupKanji(char: string): Promise<KanjiInfo | null> {
 }
 
 export async function lookupWord(word: string): Promise<WordInfo | null> {
-  const cacheKey = `word:${word}`;
-  if (memoryCache.has(cacheKey)) {
-    return memoryCache.get(cacheKey);
+  const safeWord = sanitizeAiText(word, 64);
+  if (!safeWord) return null;
+  const cacheKey = `word:${safeWord}`;
+  const cached = memoryCache.get(cacheKey);
+  if (cached) {
+    return cached;
   }
 
   try {
-    const res = await fetch(`/api/kanji?q=${encodeURIComponent(word)}&type=word`);
+    const res = await fetch(`/api/kanji?q=${encodeURIComponent(safeWord)}&type=word`);
     if (!res.ok) return null;
     const data = await res.json();
     if (data && !data.notFound) {
@@ -94,7 +102,10 @@ export async function lookupComprehensive(
   wordOrChar: string
 ): Promise<ComprehensiveHoverData> {
   const isKanji = (ch: string) => /[\u3400-\u4dbf\u4e00-\u9faf]/.test(ch);
-  const clean = wordOrChar.replace(/[（）\(\)\[\]「」『』【】、。！？!?\s\.,:;]+/g, '').trim();
+  const clean = sanitizeAiText(
+    wordOrChar.replace(/[（）\(\)\[\]「」『』【】、。！？!?\s\.,:;]+/g, ''),
+    64
+  );
   if (!clean) {
     return { kanjiList: [] };
   }

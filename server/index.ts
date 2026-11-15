@@ -6,6 +6,7 @@ import { handleMediaRoutes } from './media';
 import { handleSubtitleRoutes } from './subtitlesApi';
 import { handleFavoriteRoutes } from './favoritesApi';
 import { getRequestUrl, sendJson } from './httpUtils';
+import { HttpError } from './security';
 
 let initialized = false;
 
@@ -37,12 +38,20 @@ export async function handleApiRequest(
     if (await handleFavoriteRoutes(req, res, pathname)) return;
     if (await handleMediaRoutes(req, res, pathname)) return;
 
-    sendJson(res, 404, { error: `API route not found: ${pathname}` });
-  } catch (err: any) {
-    console.error(`[API Error] ${req.method} ${pathname}:`, err);
+    sendJson(res, 404, { error: 'API route not found.' });
+  } catch (err: unknown) {
+    if (err instanceof HttpError) {
+      if (!res.headersSent) {
+        sendJson(res, err.status, { error: err.message });
+      }
+      return;
+    }
+
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[API Error] ${req.method} ${pathname}:`, detail);
     if (!res.headersSent) {
       sendJson(res, 500, {
-        error: err?.message || 'Lỗi máy chủ nội bộ.',
+        error: 'Lỗi máy chủ nội bộ.',
       });
     }
   }

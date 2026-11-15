@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Settings, Loader2 } from 'lucide-react';
 import { DiscoveredModel, fetchGeminiModels } from '../services/gemini';
+import { isValidGeminiModelId } from '../utils/aiSecurity';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -23,17 +24,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [detectedModels, setDetectedModels] = useState<DiscoveredModel[]>(() => {
     try {
       const saved = localStorage.getItem('nihongo_gemini_models_cache');
-      return saved ? JSON.parse(saved) : [];
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed)
+        ? parsed.filter((m: any) => m && isValidGeminiModelId(m.id)).slice(0, 100)
+        : [];
     } catch {
       return [];
     }
   });
   const [modelSearchQuery, setModelSearchQuery] = useState('');
+  const [modelError, setModelError] = useState<string | null>(null);
 
   React.useEffect(() => {
     if (isOpen) {
       setApiKey(initialApiKey);
       setGeminiModel(initialModel);
+      setModelError(null);
     }
   }, [isOpen, initialApiKey, initialModel]);
 
@@ -71,20 +77,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           <label className="text-xs font-semibold text-[#f7c873] uppercase tracking-wider block">
             1. Gemini API Key
           </label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="Nhập Google Gemini API Key (AIzaSy...)"
-            className="w-full bg-[#121316] border border-[#2c2f38] rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#e04f3e] focus:ring-1 focus:ring-[#e04f3e]"
-          />
-          <div className="flex items-center justify-between text-[11px] text-[#8b909e]">
-            <span>Tra cứu từ điển và bộ thủ cơ bản hoàn toàn miễn phí không tốn token.</span>
+          <div className="flex gap-2">
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Nhập Google Gemini API Key (AIzaSy...)"
+              className="flex-1 bg-[#121316] border border-[#2c2f38] rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-[#e04f3e] focus:ring-1 focus:ring-[#e04f3e]"
+            />
+            {apiKey && (
+              <button
+                type="button"
+                onClick={() => setApiKey('')}
+                className="px-3 py-2 rounded-xl bg-[#23252d] hover:bg-red-950/60 border border-[#323544] text-[11px] font-semibold text-[#e04f3e] transition-colors shrink-0"
+                title="Xóa API Key khỏi trình duyệt"
+              >
+                Xóa Key
+              </button>
+            )}
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-[#8b909e] gap-2">
+            <span>
+              API Key chỉ lưu cục bộ trên trình duyệt của bạn và được gửi qua header bảo mật tới Google.
+            </span>
             <a
               href="https://aistudio.google.com/app/apikey"
               target="_blank"
-              rel="noreferrer"
-              className="text-[#e04f3e] hover:underline"
+              rel="noopener noreferrer"
+              className="text-[#e04f3e] hover:underline shrink-0"
             >
               Lấy API Key miễn phí ↗
             </a>
@@ -213,10 +233,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <input
               type="text"
               value={geminiModel}
-              onChange={(e) => setGeminiModel(e.target.value)}
+              onChange={(e) => {
+                setGeminiModel(e.target.value);
+                if (modelError) setModelError(null);
+              }}
               placeholder="Nhập tên model (vd: gemini-2.5-flash...)"
               className="w-full bg-[#121316] border border-[#282a35] rounded-xl px-3 py-2 text-xs font-mono text-[#f7c873] focus:outline-none focus:border-[#e04f3e]"
             />
+            {modelError && (
+              <div className="mt-1 text-[11px] text-red-400">{modelError}</div>
+            )}
           </div>
         </div>
 
@@ -233,7 +259,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </button>
             <button
               onClick={() => {
-                onSave(apiKey.trim(), geminiModel.trim() || 'gemini-2.5-flash');
+                const candidateModel = geminiModel.trim() || 'gemini-2.5-flash';
+                if (!isValidGeminiModelId(candidateModel)) {
+                  setModelError('Tên model không hợp lệ (chỉ cho phép chữ, số, ., _, -).');
+                  return;
+                }
+                onSave(apiKey.trim(), candidateModel);
                 onClose();
               }}
               className="px-4 py-1.5 rounded-xl bg-[#e04f3e] text-xs font-semibold text-white hover:bg-[#c94333] shadow-md transition-all active:scale-95"

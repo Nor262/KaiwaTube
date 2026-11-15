@@ -35,11 +35,16 @@ import {
   YouTubeSearchVideo,
 } from './types';
 import {
+  MAX_SUBTITLE_UPLOAD_BYTES,
   fetchAkaiwaSeriesData,
   fetchSubtitlesForVideo,
   fetchVideoMetadata,
   fetchYouTubePlaylistData,
   findRestoreCueForTime,
+  isSafeClientHttpUrl,
+  isValidAkaiwaSlug,
+  isValidYouTubePlaylistId,
+  isValidYouTubeVideoId,
   normalizeCueTimings,
   parseAkaiwaUrl,
   parseSrtOrVtt,
@@ -89,7 +94,23 @@ function loadRecentFromStorage(): RecentWatchItem[] {
     const raw = localStorage.getItem(RECENT_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.slice(0, 12) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (item: any) =>
+          item &&
+          typeof item === 'object' &&
+          isValidYouTubeVideoId(item.videoId) &&
+          (!item.listId || isValidYouTubePlaylistId(item.listId)) &&
+          (!item.slug || isValidAkaiwaSlug(item.slug))
+      )
+      .map((item: any) => ({
+        ...item,
+        thumbnail:
+          isSafeClientHttpUrl(item.thumbnail) ||
+          `https://i.ytimg.com/vi/${item.videoId}/mqdefault.jpg`,
+      }))
+      .slice(0, 12);
   } catch {
     return [];
   }
@@ -702,6 +723,12 @@ export function App() {
     ep: number = 1,
     opts: { startTime?: number; syncUrl?: 'push' | 'replace' | 'none' } = {}
   ) => {
+    if (!isValidAkaiwaSlug(slug)) {
+      showToast('Slug Anime không hợp lệ.');
+      setAppMode('home');
+      replaceAppUrl({ mode: 'home' });
+      return;
+    }
     const seq = ++loadSeqRef.current;
     const startSec = opts.startTime || 0;
     const syncUrl = opts.syncUrl || 'push';
@@ -761,6 +788,12 @@ export function App() {
       preservePlaylist?: boolean;
     } = {}
   ) => {
+    if (!isValidYouTubeVideoId(vid)) {
+      showToast('Mã video YouTube không hợp lệ.');
+      setAppMode('home');
+      replaceAppUrl({ mode: 'home' });
+      return;
+    }
     const seq = ++loadSeqRef.current;
     const startSec = opts.startTime || 0;
     const syncUrl = opts.syncUrl || 'push';
@@ -848,6 +881,12 @@ export function App() {
       syncUrl?: 'push' | 'replace' | 'none';
     } = {}
   ) => {
+    if (!isValidYouTubePlaylistId(listId)) {
+      showToast('Mã playlist YouTube không hợp lệ.');
+      setAppMode('home');
+      replaceAppUrl({ mode: 'home' });
+      return;
+    }
     const seq = ++loadSeqRef.current;
     const startSec = opts.startTime || 0;
     const syncUrl = opts.syncUrl || 'push';
@@ -1038,6 +1077,14 @@ export function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = '';
+    if (!/\.(srt|vtt)$/i.test(file.name)) {
+      showToast('Chỉ hỗ trợ định dạng tệp phụ đề .SRT hoặc .VTT.');
+      return;
+    }
+    if (file.size > MAX_SUBTITLE_UPLOAD_BYTES) {
+      showToast('Tệp phụ đề vượt quá giới hạn tối đa 2 MB.');
+      return;
+    }
     const text = await file.text();
     let parsed = parseSrtOrVtt(text);
     if (parsed.length === 0) {

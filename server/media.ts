@@ -1,15 +1,34 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { YoutubeTranscript } from 'youtube-transcript';
 import yts from 'yt-search';
+import { canPublishCommunitySub, getAuthUser } from './auth';
 import { getDb } from './db';
 import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
+import {
+  BoundedTtlCache,
+  HttpError,
+  SlidingWindowRateLimiter,
+  enforceRateLimit,
+  fetchWithTimeout,
+  getClientIp,
+  isSafeHttpUrl,
+  isSingleKanji,
+  isValidAkaiwaSlug,
+  isValidYouTubePlaylistId,
+  isValidYouTubeVideoId,
+  sanitizeText,
+} from './security';
 import { normalizeSubtitleCueTimings } from '../src/services/subtitleTiming';
 
-const kanjiCache = new Map<string, any>();
-const subCache = new Map<string, any[]>();
-const searchCache = new Map<string, { ts: number; data: any }>();
-const playlistCache = new Map<string, { ts: number; data: any }>();
-const homeFeedCache = new Map<string, { ts: number; data: any }>();
+const kanjiCache = new BoundedTtlCache<string, any>(500, 60 * 60 * 1000);
+const subCache = new BoundedTtlCache<string, any[]>(120, 30 * 60 * 1000);
+const searchCache = new BoundedTtlCache<string, any>(200, 5 * 60 * 1000);
+const playlistCache = new BoundedTtlCache<string, any>(200, 10 * 60 * 1000);
+const homeFeedCache = new BoundedTtlCache<string, any>(32, 15 * 60 * 1000);
+
+const translateRateLimiter = new SlidingWindowRateLimiter(40, 60 * 1000);
+const mediaFetchLimiter = new SlidingWindowRateLimiter(90, 60 * 1000);
+const mnemonicWriteLimiter = new SlidingWindowRateLimiter(30, 60 * 1000);
 
 const HOME_TOPIC_QUERIES: Record<string, { label: string; queries: string[] }> = {
   all: {
@@ -58,10 +77,12 @@ function extractRunsText(node: any): string {
 }
 
 function mapYtsVideoItem(v: any) {
+  const safeVid = isValidYouTubeVideoId(v?.videoId) ? v.videoId.trim() : '';
+  const fallback = safeVid ? `https://i.ytimg.com/vi/${safeVid}/mqdefault.jpg` : '';
   return {
-    videoId: v.videoId,
+    videoId: safeVid,
     title: v.title || '',
-    thumbnail: v.thumbnail || v.image || `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`,
+    thumbnail: isSafeHttpUrl(v.thumbnail || v.image) || fallback,
     duration: v.timestamp || v.duration?.timestamp || '',
     seconds: v.seconds || v.duration?.seconds || 0,
     views: v.views || 0,
@@ -74,20 +95,24 @@ function mapYtsPlaylistItem(pl: any) {
   return {
     listId: pl.listId,
     title: pl.title || '',
-    thumbnail: pl.thumbnail || pl.image || '',
+    thumbnail: isSafeHttpUrl(pl.thumbnail || pl.image),
     videoCount: pl.videoCount || 0,
     author: pl.author?.name || '',
   };
 }
 
 async function fetchYtInitialData(pageUrl: string): Promise<any> {
-  const resp = await fetch(pageUrl, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8,vi;q=0.7',
+  const resp = await fetchWithTimeout(
+    pageUrl,
+    {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9,ja;q=0.8,vi;q=0.7',
+      },
     },
-  });
+    12_000
+  );
   if (!resp.ok) {
     throw new Error(`YouTube HTTP ${resp.status}`);
   }
@@ -113,12 +138,12 @@ function parseCountNumber(raw: string): number {
 
 function pickThumbnailUrl(thumbs: any[], fallbackVideoId?: string): string {
   if (Array.isArray(thumbs) && thumbs.length > 0) {
-    const clean = thumbs[thumbs.length - 1]?.url || thumbs[0]?.url;
-    if (typeof clean === 'string' && clean.trim()) {
-      return clean.startsWith('//') ? `https:${clean}` : clean;
-    }
+    const safeUrl = isSafeHttpUrl(thumbs[thumbs.length - 1]?.url || thumbs[0]?.url);
+    if (safeUrl) return safeUrl;
   }
-  return fallbackVideoId ? `https://i.ytimg.com/vi/${fallbackVideoId}/mqdefault.jpg` : '';
+  return fallbackVideoId && isValidYouTubeVideoId(fallbackVideoId)
+    ? `https://i.ytimg.com/vi/${fallbackVideoId}/mqdefault.jpg`
+    : '';
 }
 
 function extractOverlayBadgeText(overlays: any[]): string {
@@ -315,9 +340,7 @@ async function fetchPlaylistNative(listId: string) {
           }
         }
         const thumbSources = lockup.contentImage?.thumbnailViewModel?.image?.sources;
-        const lThumb =
-          (Array.isArray(thumbSources) && thumbSources.length > 0 && thumbSources[0]?.url) ||
-          `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`;
+        const lThumb = pickThumbnailUrl(thumbSources || [], vid);
 
         videos.push({
           ep_number: videos.length + 1,
@@ -335,12 +358,10 @@ async function fetchPlaylistNative(listId: string) {
     const pvr = node.playlistVideoRenderer || node.playlistPanelVideoRenderer;
     if (pvr && pvr.videoId && typeof pvr.videoId === 'string') {
       const vid = pvr.videoId;
-      if (!seen.has(vid)) {
+      if (!seen.has(vid) && isValidYouTubeVideoId(vid)) {
         seen.add(vid);
         const thumbs = pvr.thumbnail?.thumbnails;
-        const thumb =
-          (Array.isArray(thumbs) && thumbs.length > 0 && thumbs[thumbs.length - 1]?.url) ||
-          `https://i.ytimg.com/vi/${vid}/mqdefault.jpg`;
+        const thumb = pickThumbnailUrl(thumbs || [], vid);
         videos.push({
           ep_number: videos.length + 1,
           videoId: vid,
@@ -371,40 +392,51 @@ async function fetchPlaylistNative(listId: string) {
 
 export async function translateBatch(texts: string[]): Promise<string[]> {
   if (!texts.length) return [];
+  const boundedTexts = texts.slice(0, 200).map((t) => sanitizeText(t, 500));
   const chunkSize = 35;
   const chunks: string[][] = [];
-  for (let i = 0; i < texts.length; i += chunkSize) {
-    chunks.push(texts.slice(i, i + chunkSize));
+  for (let i = 0; i < boundedTexts.length; i += chunkSize) {
+    chunks.push(boundedTexts.slice(i, i + chunkSize));
   }
 
-  const chunkPromises = chunks.map(async (chunk) => {
-    const combined = chunk.join('\n|||\n');
-    try {
-      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=vi&dt=t&q=${encodeURIComponent(
-        combined
-      )}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      const fullTranslated = (data[0] || []).map((item: any) => item[0]).join('');
-      const parts = fullTranslated.split(/\s*\|\|\|\s*/);
-      const resChunk: string[] = [];
-      for (let j = 0; j < chunk.length; j++) {
-        resChunk.push((parts[j] || '').trim());
-      }
-      return resChunk;
-    } catch {
-      return chunk.map(() => '');
-    }
-  });
+  const results: string[][] = new Array(chunks.length);
+  const maxConcurrency = 4;
+  let nextIdx = 0;
 
-  const results = await Promise.all(chunkPromises);
+  async function worker(): Promise<void> {
+    while (nextIdx < chunks.length) {
+      const currentIdx = nextIdx++;
+      const chunk = chunks[currentIdx];
+      const combined = chunk.join('\n|||\n');
+      try {
+        const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=vi&dt=t&q=${encodeURIComponent(
+          combined
+        )}`;
+        const res = await fetchWithTimeout(url, {}, 10_000);
+        const data = await res.json();
+        const fullTranslated = (data[0] || []).map((item: any) => item[0]).join('');
+        const parts = fullTranslated.split(/\s*\|\|\|\s*/);
+        const resChunk: string[] = [];
+        for (let j = 0; j < chunk.length; j++) {
+          resChunk.push(sanitizeText(parts[j] || '', 800));
+        }
+        results[currentIdx] = resChunk;
+      } catch {
+        results[currentIdx] = chunk.map(() => '');
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(maxConcurrency, chunks.length) }, () => worker());
+  await Promise.all(workers);
   return results.flat();
 }
 
 export async function fetchFullYouTubeSubtitles(videoId: string) {
-  if (!videoId) return [];
-  if (subCache.has(videoId)) {
-    return subCache.get(videoId)!;
+  if (!isValidYouTubeVideoId(videoId)) return [];
+  const cached = subCache.get(videoId);
+  if (cached) {
+    return cached;
   }
 
   let list: any[] = [];
@@ -439,7 +471,7 @@ export async function fetchFullYouTubeSubtitles(videoId: string) {
   const isMilliseconds = !hasNonInt && medianDur >= 100;
   const unitScale = isMilliseconds ? 1000 : 1;
 
-  const jaTexts = validItems.map((item) => item.text.replace(/\n/g, ' ').trim());
+  const jaTexts = validItems.map((item) => sanitizeText(String(item.text).replace(/\n/g, ' '), 500));
   const viTexts = await translateBatch(jaTexts);
 
   const cues = validItems.map((item, idx) => {
@@ -461,17 +493,25 @@ export async function fetchFullYouTubeSubtitles(videoId: string) {
 }
 
 export async function fetchAkaiwaSeries(slug: string, ep: number = 1) {
-  const epStr = String(ep).padStart(2, '0');
-  const url = `https://akaiwa.tv/xem/${slug}/ep${epStr}`;
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  if (!isValidAkaiwaSlug(slug)) {
+    throw new HttpError(400, 'Slug Anime không hợp lệ.');
+  }
+  const safeEp = Number.isFinite(ep) ? Math.max(1, Math.min(2000, Math.floor(ep))) : 1;
+  const epStr = String(safeEp).padStart(2, '0');
+  const url = `https://akaiwa.tv/xem/${encodeURIComponent(slug.trim())}/ep${epStr}`;
+  const res = await fetchWithTimeout(
+    url,
+    {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
     },
-  });
+    12_000
+  );
 
   if (!res.ok) {
-    throw new Error(`Akaiwa series not found (${res.status})`);
+    throw new HttpError(404, `Akaiwa series not found (${res.status})`);
   }
 
   const html = await res.text();
@@ -481,14 +521,19 @@ export async function fetchAkaiwaSeries(slug: string, ep: number = 1) {
   let episodes: Array<{ ep_number: number; youtube_video_id: string; title: string | null }> = [];
   if (epMatch) {
     try {
-      episodes = JSON.parse(epMatch[1].replace(/\\"/g, '"'));
+      const parsedEps = JSON.parse(epMatch[1].replace(/\\"/g, '"'));
+      if (Array.isArray(parsedEps)) {
+        episodes = parsedEps.filter(
+          (item: any) => item && typeof item === 'object' && isValidYouTubeVideoId(item.youtube_video_id)
+        );
+      }
     } catch (e) {
       console.warn('Failed parsing episodes json:', e);
     }
   }
 
-  const currentEp = episodes.find((e) => e.ep_number === ep) || episodes[0];
-  const videoId = currentEp?.youtube_video_id || '';
+  const currentEp = episodes.find((e) => e.ep_number === safeEp) || episodes[0];
+  const videoId = currentEp && isValidYouTubeVideoId(currentEp.youtube_video_id) ? currentEp.youtube_video_id : '';
 
   let cues: any[] = [];
   if (videoId) {
@@ -496,9 +541,9 @@ export async function fetchAkaiwaSeries(slug: string, ep: number = 1) {
   }
 
   return {
-    title: titleMatch ? titleMatch[1] : slug,
-    slug,
-    currentEp: currentEp?.ep_number || ep,
+    title: titleMatch ? sanitizeText(titleMatch[1], 200) : slug,
+    slug: slug.trim(),
+    currentEp: currentEp?.ep_number || safeEp,
     videoId,
     episodes,
     cues,
@@ -521,11 +566,18 @@ export async function handleMediaRoutes(
 ): Promise<boolean> {
   const method = (req.method || 'GET').toUpperCase();
   const url = getRequestUrl(req);
+  const clientIp = getClientIp(req);
 
   // 1. Akaiwa series & episodes proxy
   if (pathname === '/api/akaiwa' && method === 'GET') {
-    const slug = url.searchParams.get('slug') || 'that-nghiep-chuyen-sinh';
-    const ep = parseInt(url.searchParams.get('ep') || '1', 10);
+    if (!enforceRateLimit(mediaFetchLimiter, `media:${clientIp}`, res)) return true;
+    const slug = (url.searchParams.get('slug') || 'that-nghiep-chuyen-sinh').trim();
+    if (!isValidAkaiwaSlug(slug)) {
+      sendJson(res, 400, { error: 'Slug Anime không hợp lệ.' });
+      return true;
+    }
+    const rawEp = Number(url.searchParams.get('ep') || '1');
+    const ep = Number.isFinite(rawEp) ? Math.max(1, Math.min(2000, Math.floor(rawEp))) : 1;
     const data = await fetchAkaiwaSeries(slug, ep);
     sendJson(res, 200, data);
     return true;
@@ -533,9 +585,10 @@ export async function handleMediaRoutes(
 
   // 2. YouTube original CC subtitles + parallel Vietnamese translation
   if (pathname === '/api/yt-subtitles' && method === 'GET') {
-    const videoId = url.searchParams.get('v') || '';
-    if (!videoId) {
-      sendJson(res, 400, { error: 'Thiếu videoId', cues: [] });
+    if (!enforceRateLimit(mediaFetchLimiter, `media:${clientIp}`, res)) return true;
+    const videoId = (url.searchParams.get('v') || '').trim();
+    if (!isValidYouTubeVideoId(videoId)) {
+      sendJson(res, 400, { error: 'videoId không hợp lệ.', cues: [] });
       return true;
     }
     const cues = await fetchFullYouTubeSubtitles(videoId);
@@ -553,8 +606,17 @@ export async function handleMediaRoutes(
 
   // 3. Batch Japanese -> Vietnamese translation for AI merged / uploaded subtitles
   if (pathname === '/api/translate-batch' && method === 'POST') {
-    const body = await readJsonBody<{ texts?: string[] }>(req);
-    const texts = Array.isArray(body.texts) ? body.texts.map((t) => String(t || '')) : [];
+    if (!enforceRateLimit(translateRateLimiter, `tr:${clientIp}`, res)) return true;
+    const body = await readJsonBody<{ texts?: unknown[] }>(req, 256 * 1024);
+    if (!Array.isArray(body.texts)) {
+      sendJson(res, 400, { error: 'Trường texts phải là một mảng.' });
+      return true;
+    }
+    if (body.texts.length > 200) {
+      sendJson(res, 400, { error: 'Mỗi lượt dịch tối đa 200 câu.' });
+      return true;
+    }
+    const texts = body.texts.map((t) => sanitizeText(t, 500));
     const translations = await translateBatch(texts);
     sendJson(res, 200, { translations });
     return true;
@@ -562,16 +624,17 @@ export async function handleMediaRoutes(
 
   // 4. YouTube in-app search (Videos + Playlists)
   if (pathname === '/api/yt-search' && method === 'GET') {
-    const q = (url.searchParams.get('q') || '').trim();
+    if (!enforceRateLimit(mediaFetchLimiter, `media:${clientIp}`, res)) return true;
+    const q = sanitizeText(url.searchParams.get('q') || '', 120);
     if (!q) {
-      sendJson(res, 400, { error: 'Vui lòng nhập từ khóa tìm kiếm.', videos: [], playlists: [] });
+      sendJson(res, 400, { error: 'Vui lòng nhập từ khóa tìm kiếm hợp lệ.', videos: [], playlists: [] });
       return true;
     }
 
     const cacheKey = q.toLowerCase();
     const cached = searchCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < 5 * 60 * 1000) {
-      sendJson(res, 200, cached.data);
+    if (cached) {
+      sendJson(res, 200, cached);
       return true;
     }
 
@@ -581,22 +644,23 @@ export async function handleMediaRoutes(
       videos: result.videos,
       playlists: result.playlists,
     };
-    searchCache.set(cacheKey, { ts: Date.now(), data: payload });
+    searchCache.set(cacheKey, payload);
     sendJson(res, 200, payload);
     return true;
   }
 
   // 5. YouTube Playlist fetcher (supports modern lockupViewModel + classic playlistVideoRenderer)
   if (pathname === '/api/yt-playlist' && method === 'GET') {
+    if (!enforceRateLimit(mediaFetchLimiter, `media:${clientIp}`, res)) return true;
     const listId = (url.searchParams.get('list') || '').trim();
-    if (!listId) {
-      sendJson(res, 400, { error: 'Thiếu listId.' });
+    if (!isValidYouTubePlaylistId(listId)) {
+      sendJson(res, 400, { error: 'listId không hợp lệ.' });
       return true;
     }
 
     const cached = playlistCache.get(listId);
-    if (cached && Date.now() - cached.ts < 10 * 60 * 1000) {
-      sendJson(res, 200, cached.data);
+    if (cached) {
+      sendJson(res, 200, cached);
       return true;
     }
 
@@ -613,43 +677,50 @@ export async function handleMediaRoutes(
     if (!payload) {
       try {
         const pl = await yts({ listId });
-        const videos = (pl.videos || []).map((v: any, idx: number) => ({
-          ep_number: idx + 1,
-          videoId: v.videoId,
-          title: v.title || `Video ${idx + 1}`,
-          thumbnail: v.thumbnail || `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`,
-          duration: v.duration?.timestamp || '',
-          author: v.author?.name || '',
-        }));
+        const videos = (pl.videos || [])
+          .filter((v: any) => isValidYouTubeVideoId(v?.videoId))
+          .map((v: any, idx: number) => ({
+            ep_number: idx + 1,
+            videoId: v.videoId,
+            title: v.title || `Video ${idx + 1}`,
+            thumbnail:
+              isSafeHttpUrl(v.thumbnail) ||
+              `https://i.ytimg.com/vi/${v.videoId}/mqdefault.jpg`,
+            duration: v.duration?.timestamp || '',
+            author: v.author?.name || '',
+          }));
         payload = {
           listId: pl.listId || listId,
           title: pl.title || `Playlist (${listId})`,
           author: (pl as any).author?.name || '',
-          thumbnail: pl.thumbnail || pl.image || videos[0]?.thumbnail || '',
+          thumbnail:
+            isSafeHttpUrl(pl.thumbnail || pl.image) || videos[0]?.thumbnail || '',
           videos,
         };
       } catch (err: any) {
+        console.warn(`[PlaylistFallback] Failed loading ${listId}:`, err?.message);
         sendJson(res, 502, {
-          error: `Không tải được playlist (${err?.message || 'lỗi từ YouTube'}).`,
+          error: 'Không tải được playlist từ YouTube.',
           videos: [],
         });
         return true;
       }
     }
 
-    playlistCache.set(listId, { ts: Date.now(), data: payload });
+    playlistCache.set(listId, payload);
     sendJson(res, 200, payload);
     return true;
   }
 
   // 5b. YouTube-style Home Feed by category topic (cached 15 min)
   if (pathname === '/api/yt-home' && method === 'GET') {
+    if (!enforceRateLimit(mediaFetchLimiter, `media:${clientIp}`, res)) return true;
     const topicParam = (url.searchParams.get('topic') || 'all').trim();
     const topicKey = HOME_TOPIC_QUERIES[topicParam] ? topicParam : 'all';
 
     const cached = homeFeedCache.get(topicKey);
-    if (cached && Date.now() - cached.ts < 15 * 60 * 1000) {
-      sendJson(res, 200, cached.data);
+    if (cached) {
+      sendJson(res, 200, cached);
       return true;
     }
 
@@ -688,24 +759,27 @@ export async function handleMediaRoutes(
       videos: videos.slice(0, 24),
       playlists: playlists.slice(0, 8),
     };
-    homeFeedCache.set(topicKey, { ts: Date.now(), data: payload });
+    homeFeedCache.set(topicKey, payload);
     sendJson(res, 200, payload);
     return true;
   }
 
   // 6. Single YouTube Video Metadata fetcher
   if (pathname === '/api/yt-video' && method === 'GET') {
+    if (!enforceRateLimit(mediaFetchLimiter, `media:${clientIp}`, res)) return true;
     const videoId = (url.searchParams.get('v') || '').trim();
-    if (!videoId) {
-      sendJson(res, 400, { error: 'Thiếu videoId.' });
+    if (!isValidYouTubeVideoId(videoId)) {
+      sendJson(res, 400, { error: 'videoId không hợp lệ.' });
       return true;
     }
     try {
       const v = await yts({ videoId });
       sendJson(res, 200, {
-        videoId: v.videoId || videoId,
+        videoId: isValidYouTubeVideoId(v.videoId) ? v.videoId : videoId,
         title: v.title || `Video (${videoId})`,
-        thumbnail: v.thumbnail || v.image || `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+        thumbnail:
+          isSafeHttpUrl(v.thumbnail || v.image) ||
+          `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
         duration: v.timestamp || '',
         author: v.author?.name || '',
       });
@@ -723,16 +797,21 @@ export async function handleMediaRoutes(
 
   // 7. Kanji & Word Dictionary API (Mazii proxy + cached mnemonic)
   if (pathname === '/api/kanji' && method === 'GET') {
-    const q = url.searchParams.get('q') || '';
-    const type = url.searchParams.get('type') || 'kanji';
-    if (!q) {
-      sendJson(res, 400, { error: 'Missing query (q)' });
+    if (!enforceRateLimit(mediaFetchLimiter, `media:${clientIp}`, res)) return true;
+    const q = sanitizeText(url.searchParams.get('q') || '', 64);
+    const type = (url.searchParams.get('type') || 'kanji').trim();
+    if (!q || !['kanji', 'word'].includes(type)) {
+      sendJson(res, 400, { error: 'Tham số tra cứu q hoặc type không hợp lệ.' });
+      return true;
+    }
+    if (type === 'kanji' && !isSingleKanji(q)) {
+      sendJson(res, 400, { error: 'Tra cứu Kanji yêu cầu đúng 1 chữ Hán.' });
       return true;
     }
 
     const cacheKey = `${type}:${q}`;
-    if (kanjiCache.has(cacheKey)) {
-      const cached = kanjiCache.get(cacheKey);
+    const cached = kanjiCache.get(cacheKey);
+    if (cached) {
       if (type === 'kanji') {
         const mn = getStoredMnemonic(cached.kanji || q);
         sendJson(res, 200, mn ? { ...cached, decomposition: mn.decomposition, mnemonic: mn.mnemonic } : cached);
@@ -743,12 +822,16 @@ export async function handleMediaRoutes(
     }
 
     if (type === 'word') {
-      const mRes = await fetch('https://mazii.net/api/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dict: 'javi', type: 'word', query: q, page: 1 }),
-      });
-      const data = await mRes.json();
+      const mRes = await fetchWithTimeout(
+        'https://mazii.net/api/search',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dict: 'javi', type: 'word', query: q, page: 1 }),
+        },
+        10_000
+      );
+      const data = mRes.ok ? await mRes.json() : null;
       const w = data?.data?.[0];
       if (w && w.means?.length) {
         const result = {
@@ -769,9 +852,9 @@ export async function handleMediaRoutes(
       const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=vi&dt=t&q=${encodeURIComponent(
         q
       )}`;
-      const gRes = await fetch(gUrl);
-      const gData = await gRes.json();
-      const gMeaning = (gData[0] || []).map((item: any) => item[0]).join('').trim();
+      const gRes = await fetchWithTimeout(gUrl, {}, 10_000);
+      const gData = gRes.ok ? await gRes.json() : null;
+      const gMeaning = (gData?.[0] || []).map((item: any) => item[0]).join('').trim();
       if (gMeaning) {
         const result = {
           type: 'word',
@@ -788,14 +871,18 @@ export async function handleMediaRoutes(
       return true;
     }
 
-    const mRes = await fetch('https://mazii.net/api/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ dict: 'javi', type: 'kanji', query: q, page: 1 }),
-    });
+    const mRes = await fetchWithTimeout(
+      'https://mazii.net/api/search',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dict: 'javi', type: 'kanji', query: q, page: 1 }),
+      },
+      10_000
+    );
 
     if (!mRes.ok) {
-      throw new Error('Mazii API error');
+      throw new HttpError(502, 'Mazii API tạm thời không phản hồi.');
     }
 
     const data = await mRes.json();
@@ -829,8 +916,8 @@ export async function handleMediaRoutes(
   // 8. Kanji Mnemonic Shared Cache (stores AI breakdown & mnemonic for instant reuse)
   if (pathname === '/api/kanji-mnemonic' && method === 'GET') {
     const kanji = (url.searchParams.get('kanji') || '').trim();
-    if (!kanji) {
-      sendJson(res, 400, { error: 'Thiếu kanji.' });
+    if (!isSingleKanji(kanji)) {
+      sendJson(res, 400, { error: 'Tham số kanji phải là đúng 1 chữ Hán hợp lệ.' });
       return true;
     }
     const row = getStoredMnemonic(kanji);
@@ -839,36 +926,71 @@ export async function handleMediaRoutes(
   }
 
   if (pathname === '/api/kanji-mnemonic' && method === 'POST') {
-    const body = await readJsonBody<{
-      items?: Array<{
-        kanji: string;
-        hanViet?: string;
-        decomposition: string;
-        mnemonic: string;
-      }>;
-    }>(req);
-
-    const items = Array.isArray(body.items) ? body.items : [];
-    const db = getDb();
-    const stmt = db.prepare(`
-      INSERT INTO kanji_mnemonics (kanji, han_viet, decomposition, mnemonic, updated_at)
-      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(kanji) DO UPDATE SET
-        han_viet = CASE WHEN excluded.han_viet != '' THEN excluded.han_viet ELSE kanji_mnemonics.han_viet END,
-        decomposition = excluded.decomposition,
-        mnemonic = excluded.mnemonic,
-        updated_at = CURRENT_TIMESTAMP
-    `);
-
-    for (const item of items) {
-      const k = String(item.kanji || '').trim();
-      const d = String(item.decomposition || '').trim();
-      const m = String(item.mnemonic || '').trim();
-      if (!k || (!d && !m)) continue;
-      stmt.run(k, String(item.hanViet || '').trim().toUpperCase(), d, m);
+    const user = getAuthUser(req);
+    if (!user) {
+      sendJson(res, 401, { error: 'Vui lòng đăng nhập để đóng góp bộ nhớ Kanji.' });
+      return true;
+    }
+    if (!enforceRateLimit(mnemonicWriteLimiter, `mn:${clientIp}:${user.id}`, res)) {
+      return true;
     }
 
-    sendJson(res, 200, { ok: true });
+    const body = await readJsonBody<{
+      items?: Array<{
+        kanji?: unknown;
+        hanViet?: unknown;
+        decomposition?: unknown;
+        mnemonic?: unknown;
+      }>;
+    }>(req, 32 * 1024);
+
+    if (!Array.isArray(body.items) || body.items.length === 0) {
+      sendJson(res, 400, { error: 'Danh sách items không hợp lệ.' });
+      return true;
+    }
+    if (body.items.length > 24) {
+      sendJson(res, 400, { error: 'Tối đa 24 chữ Kanji mỗi lần lưu.' });
+      return true;
+    }
+
+    const db = getDb();
+    const isPrivileged = canPublishCommunitySub(user);
+    // Regular users may only populate missing mnemonics (prevents overwriting shared cache)
+    const stmt = isPrivileged
+      ? db.prepare(`
+          INSERT INTO kanji_mnemonics (kanji, han_viet, decomposition, mnemonic, updated_at)
+          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(kanji) DO UPDATE SET
+            han_viet = CASE WHEN excluded.han_viet != '' THEN excluded.han_viet ELSE kanji_mnemonics.han_viet END,
+            decomposition = excluded.decomposition,
+            mnemonic = excluded.mnemonic,
+            updated_at = CURRENT_TIMESTAMP
+        `)
+      : db.prepare(`
+          INSERT INTO kanji_mnemonics (kanji, han_viet, decomposition, mnemonic, updated_at)
+          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+          ON CONFLICT(kanji) DO NOTHING
+        `);
+
+    let savedCount = 0;
+    for (const item of body.items) {
+      if (!item || typeof item !== 'object') continue;
+      const k = typeof item.kanji === 'string' ? item.kanji.trim() : '';
+      if (!isSingleKanji(k)) continue;
+      const d = sanitizeText(item.decomposition || '', 400);
+      const m = sanitizeText(item.mnemonic || '', 500);
+      if (!d && !m) continue;
+      const hv = sanitizeText(item.hanViet || '', 64).toUpperCase();
+      stmt.run(k, hv, d, m);
+      savedCount++;
+    }
+
+    if (savedCount === 0) {
+      sendJson(res, 400, { error: 'Không có mục Kanji hợp lệ để lưu.' });
+      return true;
+    }
+
+    sendJson(res, 200, { ok: true, savedCount });
     return true;
   }
 
