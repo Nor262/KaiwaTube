@@ -248,11 +248,20 @@ export async function fetchYouTubeVideoApi(videoId: string): Promise<{
 
 export async function translateBatchServer(texts: string[]): Promise<string[]> {
   if (!texts.length) return [];
-  const data = await apiFetch<{ translations: string[] }>('/api/translate-batch', {
-    method: 'POST',
-    body: JSON.stringify({ texts }),
-  });
-  return data.translations || texts.map(() => '');
+  const BATCH_LIMIT = 150;
+  const output: string[] = [];
+  for (let i = 0; i < texts.length; i += BATCH_LIMIT) {
+    const slice = texts.slice(i, i + BATCH_LIMIT);
+    const data = await apiFetch<{ translations: string[] }>('/api/translate-batch', {
+      method: 'POST',
+      body: JSON.stringify({ texts: slice }),
+    });
+    const chunkOut = Array.isArray(data.translations) ? data.translations : slice.map(() => '');
+    for (let j = 0; j < slice.length; j++) {
+      output.push(chunkOut[j] || '');
+    }
+  }
+  return output;
 }
 
 // --- Kanji Mnemonics Shared Cache ---
