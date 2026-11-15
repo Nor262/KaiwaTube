@@ -1,3 +1,9 @@
+import {
+  isValidAkaiwaSlug,
+  isValidYouTubePlaylistId,
+  isValidYouTubeVideoId,
+} from '../services/youtube';
+
 export interface AppUrlState {
   mode: 'home' | 'watch' | 'search' | 'favorites';
   anime?: string;
@@ -13,10 +19,11 @@ export function parseAppUrl(loc: Location = window.location): AppUrlState {
   const path = loc.pathname.replace(/\/+$/, '') || '/';
 
   const tRaw = params.get('t');
-  const tParsed = tRaw ? Math.max(0, Math.floor(Number(tRaw))) : 0;
+  const tParsed = tRaw ? Math.max(0, Math.min(86400 * 7, Math.floor(Number(tRaw)))) : 0;
   const t = Number.isFinite(tParsed) ? tParsed : 0;
 
-  const q = params.get('q') || undefined;
+  const rawQ = params.get('q');
+  const q = rawQ ? rawQ.trim().slice(0, 120) : undefined;
   const view = params.get('view');
 
   if (path === '/search' || view === 'search') {
@@ -26,11 +33,15 @@ export function parseAppUrl(loc: Location = window.location): AppUrlState {
     return { mode: 'favorites' };
   }
 
-  const anime = params.get('anime') || undefined;
+  const rawAnime = params.get('anime')?.trim();
+  const anime = rawAnime && isValidAkaiwaSlug(rawAnime) ? rawAnime : undefined;
   const epRaw = params.get('ep');
-  const ep = epRaw ? Math.max(1, parseInt(epRaw, 10) || 1) : 1;
-  const list = params.get('list') || undefined;
-  const v = params.get('v') || undefined;
+  const epNum = epRaw ? parseInt(epRaw, 10) || 1 : 1;
+  const ep = Math.max(1, Math.min(2000, epNum));
+  const rawList = params.get('list')?.trim();
+  const list = rawList && isValidYouTubePlaylistId(rawList) ? rawList : undefined;
+  const rawV = params.get('v')?.trim();
+  const v = rawV && isValidYouTubeVideoId(rawV) ? rawV : undefined;
 
   if (anime || list || v) {
     return { mode: 'watch', anime, ep, list, v, t };
@@ -48,7 +59,7 @@ export function buildUrlString(state: AppUrlState): string {
   }
 
   if (state.mode === 'search') {
-    if (state.q) params.set('q', state.q);
+    if (state.q) params.set('q', state.q.trim().slice(0, 120));
     const qs = params.toString();
     return qs ? `/search?${qs}` : '/search';
   }
@@ -57,16 +68,16 @@ export function buildUrlString(state: AppUrlState): string {
     return '/favorites';
   }
 
-  if (state.anime) {
+  if (state.anime && isValidAkaiwaSlug(state.anime)) {
     params.set('anime', state.anime);
-    params.set('ep', String(state.ep || 1));
+    params.set('ep', String(Math.max(1, Math.min(2000, state.ep || 1))));
   } else {
-    if (state.list) params.set('list', state.list);
-    if (state.v) params.set('v', state.v);
+    if (state.list && isValidYouTubePlaylistId(state.list)) params.set('list', state.list);
+    if (state.v && isValidYouTubeVideoId(state.v)) params.set('v', state.v);
   }
 
   if (state.t && state.t > 0) {
-    params.set('t', String(Math.floor(state.t)));
+    params.set('t', String(Math.min(86400 * 7, Math.floor(state.t))));
   }
 
   const qs = params.toString();
