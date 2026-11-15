@@ -2,6 +2,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getDb } from './db';
 import { canPublishCommunitySub, getAuthUser } from './auth';
 import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
+import {
+  HttpError,
+  isValidYouTubeVideoId,
+  parsePositiveIntId,
+  sanitizeText,
+} from './security';
+
+const MAX_SUBTITLE_BODY_BYTES = 4 * 1024 * 1024;
+const ALLOWED_SUB_SOURCE_TYPES = new Set(['ai_merged', 'uploaded']);
 
 interface NormalizedCue {
   id: string;
@@ -11,32 +20,45 @@ interface NormalizedCue {
   vi?: string;
 }
 
+function safeParseCuesJson(rawJson: string | null | undefined): NormalizedCue[] {
+  try {
+    const parsed = JSON.parse(rawJson || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 function validateAndNormalizeCues(rawCues: unknown): NormalizedCue[] {
   if (!Array.isArray(rawCues) || rawCues.length === 0) {
-    throw new Error('Danh sách phụ đề không được rỗng.');
+    throw new HttpError(400, 'Danh sách phụ đề không được rỗng.');
   }
   if (rawCues.length > 6000) {
-    throw new Error('Số lượng câu phụ đề vượt quá giới hạn 6000 dòng.');
+    throw new HttpError(400, 'Số lượng câu phụ đề vượt quá giới hạn 6000 dòng.');
   }
 
   const normalized: NormalizedCue[] = [];
   for (let i = 0; i < rawCues.length; i++) {
     const c = rawCues[i] as any;
-    const ja = String(c?.ja || '').trim();
+    const ja = sanitizeText(c?.ja, 600, { preserveNewlines: true });
     const start = Number(c?.start);
     const end = Number(c?.end);
     if (!ja || !Number.isFinite(start) || !Number.isFinite(end)) continue;
+    const safeStart = Math.max(0, start);
+    const safeEnd = Math.max(safeStart, end);
+    const vi = c?.vi ? sanitizeText(c.vi, 600, { preserveNewlines: true }) : '';
+    const id = sanitizeText(c?.id, 64) || `${safeStart}-${i}`;
     normalized.push({
-      id: String(c?.id || `${start}-${i}`),
-      start: Math.max(0, start),
-      end: Math.max(start, end),
+      id,
+      start: safeStart,
+      end: safeEnd,
       ja,
-      vi: c?.vi ? String(c.vi).trim() : undefined,
+      vi: vi || undefined,
     });
   }
 
   if (normalized.length === 0) {
-    throw new Error('Không tìm thấy câu phụ đề hợp lệ.');
+    throw new HttpError(400, 'Không tìm thấy câu phụ đề hợp lệ.');
   }
   return normalized;
 }
@@ -53,8 +75,8 @@ export async function handleSubtitleRoutes(
   // 1. Get all saved subtitle tracks (community + current user personal) for a video
   if (pathname === '/api/subtitles' && method === 'GET') {
     const videoId = (url.searchParams.get('v') || '').trim();
-    if (!videoId) {
-      sendJson(res, 400, { error: 'Thiếu videoId (v).' });
+    if (!isValidYouTubeVideoId(videoId)) {
+      sendJson(res, 400, { error: 'videoId (v) không hợp lệ.' });
       return true;
     }
 
@@ -67,7 +89,7 @@ export async function handleSubtitleRoutes(
                 (SELECT COUNT(*) FROM subtitle_reports r WHERE r.community_sub_id = cs.id) AS report_count
          FROM community_subtitles cs
          WHERE cs.video_id = ?
-         ORDER BY cs.updated_at DESC`
+         ORDER BY cs.updated_at DESC LIMIT 50`
       )
       .all(videoId) as any[];
 
@@ -82,7 +104,7 @@ export async function handleSubtitleRoutes(
       reportCount: row.report_count || 0,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      cues: JSON.parse(row.cues_json),
+      cues: safeParseCuesJson(row.cues_json),
     }));
 
     let personal: any[] = [];
@@ -92,7 +114,7 @@ export async function handleSubtitleRoutes(
           `SELECT id, video_id, title, source_type, cues_json, cue_count, created_at, updated_at
            FROM user_subtitles
            WHERE user_id = ? AND video_id = ?
-           ORDER BY updated_at DESC`
+           ORDER BY updated_at DESC LIMIT 20`
         )
         .all(user.id, videoId) as any[];
 
@@ -104,7 +126,7 @@ export async function handleSubtitleRoutes(
         cueCount: row.cue_count,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
-        cues: JSON.parse(row.cues_json),
+        cues: safeParseCuesJson(row.cues_json),
       }));
     }
 
@@ -120,11 +142,11 @@ export async function handleSubtitleRoutes(
       return true;
     }
 
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_SUBTITLE_BODY_BYTES);
     const videoId = String(body.videoId || '').trim();
-    const title = String(body.title || '').trim() || 'Phụ đề cá nhân';
+    const title = sanitizeText(body.title, 160) || 'Phụ đề cá nhân';
     const sourceType = String(body.sourceType || '').trim();
-    if (!videoId || !['ai_merged', 'uploaded'].includes(sourceType)) {
+    if (!isValidYouTubeVideoId(videoId) || !ALLOWED_SUB_SOURCE_TYPES.has(sourceType)) {
       sendJson(res, 400, { error: 'Dữ liệu videoId hoặc sourceType không hợp lệ.' });
       return true;
     }
@@ -156,20 +178,25 @@ export async function handleSubtitleRoutes(
         cueCount: saved.cue_count,
         createdAt: saved.created_at,
         updatedAt: saved.updated_at,
-        cues: JSON.parse(saved.cues_json),
+        cues: safeParseCuesJson(saved.cues_json),
       },
     });
     return true;
   }
 
   // 3. Delete user's own personal subtitle
-  if (pathname.startsWith('/api/subtitles/user/') && method === 'DELETE') {
+  const userDeleteMatch = pathname.match(/^\/api\/subtitles\/user\/([1-9]\d*)$/);
+  if (userDeleteMatch && method === 'DELETE') {
     const user = getAuthUser(req);
     if (!user) {
       sendJson(res, 401, { error: 'Chưa đăng nhập.' });
       return true;
     }
-    const id = Number(pathname.split('/')[4]);
+    const id = parsePositiveIntId(userDeleteMatch[1]);
+    if (!id) {
+      sendJson(res, 400, { error: 'ID phụ đề không hợp lệ.' });
+      return true;
+    }
     const info = db
       .prepare('DELETE FROM user_subtitles WHERE id = ? AND user_id = ?')
       .run(id, user.id);
@@ -196,16 +223,17 @@ export async function handleSubtitleRoutes(
       return true;
     }
 
-    const body = await readJsonBody(req);
+    const body = await readJsonBody(req, MAX_SUBTITLE_BODY_BYTES);
     const videoId = String(body.videoId || '').trim();
-    const title = String(body.title || '').trim() || 'Sub Cộng đồng';
+    const title = sanitizeText(body.title, 160) || 'Sub Cộng đồng';
     const sourceType = String(body.sourceType || '').trim();
-    if (!videoId || !['ai_merged', 'uploaded'].includes(sourceType)) {
+    if (!isValidYouTubeVideoId(videoId) || !ALLOWED_SUB_SOURCE_TYPES.has(sourceType)) {
       sendJson(res, 400, { error: 'videoId hoặc sourceType không hợp lệ.' });
       return true;
     }
 
     const cues = validateAndNormalizeCues(body.cues);
+    const authorName = sanitizeText(user.displayName || user.username, 80) || user.username;
     const result = db
       .prepare(
         `INSERT INTO community_subtitles (video_id, title, source_type, author_id, author_name, cues_json, cue_count)
@@ -216,7 +244,7 @@ export async function handleSubtitleRoutes(
         title,
         sourceType,
         user.id,
-        user.displayName || user.username,
+        authorName,
         JSON.stringify(cues),
         cues.length
       );
@@ -240,25 +268,27 @@ export async function handleSubtitleRoutes(
         reportCount: 0,
         createdAt: created.created_at,
         updatedAt: created.updated_at,
-        cues: JSON.parse(created.cues_json),
+        cues: safeParseCuesJson(created.cues_json),
       },
     });
     return true;
   }
 
   // 5. Update Community Subtitle (Admin or original Contributor author)
-  if (
-    pathname.startsWith('/api/subtitles/community/') &&
-    !pathname.endsWith('/report') &&
-    method === 'PUT'
-  ) {
+  const communityItemMatch = pathname.match(/^\/api\/subtitles\/community\/([1-9]\d*)$/);
+  if (communityItemMatch && method === 'PUT') {
     const user = getAuthUser(req);
     if (!user || !canPublishCommunitySub(user)) {
       sendJson(res, 403, { error: 'Bạn không có quyền chỉnh sửa phụ đề cộng đồng.' });
       return true;
     }
 
-    const id = Number(pathname.split('/')[4]);
+    const id = parsePositiveIntId(communityItemMatch[1]);
+    if (!id) {
+      sendJson(res, 400, { error: 'ID phụ đề không hợp lệ.' });
+      return true;
+    }
+
     const existing = db
       .prepare('SELECT id, author_id FROM community_subtitles WHERE id = ?')
       .get(id) as { id: number; author_id: number } | undefined;
@@ -271,8 +301,8 @@ export async function handleSubtitleRoutes(
       return true;
     }
 
-    const body = await readJsonBody(req);
-    const title = body.title ? String(body.title).trim() : undefined;
+    const body = await readJsonBody(req, MAX_SUBTITLE_BODY_BYTES);
+    const title = body.title ? sanitizeText(body.title, 160) : undefined;
     const cues = validateAndNormalizeCues(body.cues);
 
     if (title) {
@@ -303,25 +333,26 @@ export async function handleSubtitleRoutes(
         cueCount: updated.cue_count,
         createdAt: updated.created_at,
         updatedAt: updated.updated_at,
-        cues: JSON.parse(updated.cues_json),
+        cues: safeParseCuesJson(updated.cues_json),
       },
     });
     return true;
   }
 
   // 6. Delete Community Subtitle (Admin or original Contributor author)
-  if (
-    pathname.startsWith('/api/subtitles/community/') &&
-    !pathname.endsWith('/report') &&
-    method === 'DELETE'
-  ) {
+  if (communityItemMatch && method === 'DELETE') {
     const user = getAuthUser(req);
     if (!user || !canPublishCommunitySub(user)) {
       sendJson(res, 403, { error: 'Bạn không có quyền xóa phụ đề cộng đồng.' });
       return true;
     }
 
-    const id = Number(pathname.split('/')[4]);
+    const id = parsePositiveIntId(communityItemMatch[1]);
+    if (!id) {
+      sendJson(res, 400, { error: 'ID phụ đề không hợp lệ.' });
+      return true;
+    }
+
     const existing = db
       .prepare('SELECT id, author_id FROM community_subtitles WHERE id = ?')
       .get(id) as { id: number; author_id: number } | undefined;
@@ -340,17 +371,18 @@ export async function handleSubtitleRoutes(
   }
 
   // 7. Report Faulty Community Subtitle (Any logged-in user)
-  if (
-    pathname.startsWith('/api/subtitles/community/') &&
-    pathname.endsWith('/report') &&
-    method === 'POST'
-  ) {
+  const reportMatch = pathname.match(/^\/api\/subtitles\/community\/([1-9]\d*)\/report$/);
+  if (reportMatch && method === 'POST') {
     const user = getAuthUser(req);
     if (!user) {
       sendJson(res, 401, { error: 'Vui lòng đăng nhập để báo cáo lỗi phụ đề.' });
       return true;
     }
-    const id = Number(pathname.split('/')[4]);
+    const id = parsePositiveIntId(reportMatch[1]);
+    if (!id) {
+      sendJson(res, 400, { error: 'ID phụ đề không hợp lệ.' });
+      return true;
+    }
     const existing = db
       .prepare('SELECT id FROM community_subtitles WHERE id = ?')
       .get(id);
@@ -359,8 +391,9 @@ export async function handleSubtitleRoutes(
       return true;
     }
 
-    const body = await readJsonBody(req);
-    const reason = String(body.reason || 'Sub bị lệch thời gian hoặc dịch sai nghiêm trọng').trim();
+    const body = await readJsonBody(req, 16 * 1024);
+    const reason =
+      sanitizeText(body.reason, 500) || 'Sub bị lệch thời gian hoặc dịch sai nghiêm trọng';
 
     db.prepare(
       `INSERT INTO subtitle_reports (community_sub_id, user_id, reason)
