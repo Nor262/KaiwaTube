@@ -1,6 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { loadEnv } from './env';
-import { getDb } from './db';
 import { handleAuthRoutes } from './auth';
 import { handleMediaRoutes } from './media';
 import { handleSubtitleRoutes } from './subtitlesApi';
@@ -13,7 +12,6 @@ let initialized = false;
 export function ensureServerInit(): void {
   if (initialized) return;
   loadEnv();
-  getDb();
   initialized = true;
 }
 

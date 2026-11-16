@@ -9,10 +9,49 @@ export function sendJson(res: ServerResponse, status: number, payload: unknown):
   res.end(JSON.stringify(payload));
 }
 
+function parseJsonObjectText<T>(rawText: string, maxBytes: number): T {
+  const trimmed = rawText.trim();
+  if (!trimmed) return {} as T;
+  if (Buffer.byteLength(trimmed, 'utf8') > maxBytes) {
+    throw new HttpError(413, 'Dữ liệu gửi lên vượt quá giới hạn cho phép.');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new HttpError(400, 'Định dạng JSON không hợp lệ.');
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new HttpError(400, 'Dữ liệu JSON phải là một đối tượng hợp lệ.');
+  }
+  return parsed as T;
+}
+
 export async function readJsonBody<T = Record<string, any>>(
   req: IncomingMessage,
   maxBytes = 64 * 1024
 ): Promise<T> {
+  // Vercel's Node.js runtime may pre-consume and populate req.body before our handler runs.
+  const preParsed = (req as IncomingMessage & { body?: unknown }).body;
+  if (preParsed !== undefined) {
+    if (typeof preParsed === 'string') {
+      return parseJsonObjectText<T>(preParsed, maxBytes);
+    }
+    if (Buffer.isBuffer(preParsed)) {
+      if (preParsed.length > maxBytes) {
+        throw new HttpError(413, 'Dữ liệu gửi lên vượt quá giới hạn cho phép.');
+      }
+      return parseJsonObjectText<T>(preParsed.toString('utf8'), maxBytes);
+    }
+    if (preParsed === null || typeof preParsed !== 'object' || Array.isArray(preParsed)) {
+      throw new HttpError(400, 'Dữ liệu JSON phải là một đối tượng hợp lệ.');
+    }
+    if (Buffer.byteLength(JSON.stringify(preParsed), 'utf8') > maxBytes) {
+      throw new HttpError(413, 'Dữ liệu gửi lên vượt quá giới hạn cho phép.');
+    }
+    return preParsed as T;
+  }
+
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -38,21 +77,12 @@ export async function readJsonBody<T = Record<string, any>>(
     req.on('end', () => {
       if (settled) return;
       try {
-        const raw = Buffer.concat(chunks).toString('utf8').trim();
-        if (!raw) {
-          settled = true;
-          resolve({} as T);
-          return;
-        }
-        const parsed = JSON.parse(raw);
-        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-          fail(new HttpError(400, 'Dữ liệu JSON phải là một đối tượng hợp lệ.'));
-          return;
-        }
+        const raw = Buffer.concat(chunks).toString('utf8');
+        const parsed = parseJsonObjectText<T>(raw, maxBytes);
         settled = true;
-        resolve(parsed as T);
-      } catch {
-        fail(new HttpError(400, 'Định dạng JSON không hợp lệ.'));
+        resolve(parsed);
+      } catch (err) {
+        fail(err instanceof Error ? err : new HttpError(400, 'Định dạng JSON không hợp lệ.'));
       }
     });
 

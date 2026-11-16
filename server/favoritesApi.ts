@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { getDb } from './db';
+import { getDb, normalizeDbTimestamp } from './db';
 import { getAuthUser } from './auth';
 import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
 import { isSafeHttpUrl, isValidItemId, sanitizeText } from './security';
@@ -18,6 +18,19 @@ function safeParseMetaObject(raw: string | null | undefined): Record<string, unk
   }
 }
 
+function serializeFavoriteRow(r: Record<string, any>) {
+  return {
+    id: Number(r.id),
+    itemType: r.item_type,
+    itemId: r.item_id,
+    title: r.title,
+    subtitle: r.subtitle || '',
+    thumbnail: isSafeHttpUrl(r.thumbnail || ''),
+    meta: safeParseMetaObject(r.meta_json),
+    createdAt: normalizeDbTimestamp(r.created_at),
+  };
+}
+
 export async function handleFavoriteRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -25,10 +38,11 @@ export async function handleFavoriteRoutes(
 ): Promise<boolean> {
   if (pathname !== '/api/favorites') return false;
 
-  const db = getDb();
+  const db = await getDb();
+  const favTable = db.table('favorites');
   const method = (req.method || 'GET').toUpperCase();
   const url = getRequestUrl(req);
-  const user = getAuthUser(req);
+  const user = await getAuthUser(req);
 
   if (!user) {
     sendJson(res, 401, { error: 'Vui lòng đăng nhập để sử dụng Mục yêu thích.' });
@@ -42,34 +56,19 @@ export async function handleFavoriteRoutes(
       return true;
     }
 
-    const rows = (
-      typeFilter
-        ? db
-            .prepare(
-              `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
-               FROM favorites WHERE user_id = ? AND item_type = ? ORDER BY created_at DESC LIMIT 500`
-            )
-            .all(user.id, typeFilter)
-        : db
-            .prepare(
-              `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
-               FROM favorites WHERE user_id = ? ORDER BY created_at DESC LIMIT 500`
-            )
-            .all(user.id)
-    ) as any[];
+    const rows = typeFilter
+      ? await db.queryAll<Record<string, any>>(
+          `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
+           FROM ${favTable} WHERE user_id = ? AND item_type = ? ORDER BY created_at DESC LIMIT 500`,
+          [user.id, typeFilter]
+        )
+      : await db.queryAll<Record<string, any>>(
+          `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
+           FROM ${favTable} WHERE user_id = ? ORDER BY created_at DESC LIMIT 500`,
+          [user.id]
+        );
 
-    const favorites = rows.map((r) => ({
-      id: r.id,
-      itemType: r.item_type,
-      itemId: r.item_id,
-      title: r.title,
-      subtitle: r.subtitle || '',
-      thumbnail: isSafeHttpUrl(r.thumbnail || ''),
-      meta: safeParseMetaObject(r.meta_json),
-      createdAt: r.created_at,
-    }));
-
-    sendJson(res, 200, { favorites });
+    sendJson(res, 200, { favorites: rows.map(serializeFavoriteRow) });
     return true;
   }
 
@@ -100,35 +99,24 @@ export async function handleFavoriteRoutes(
       return true;
     }
 
-    db.prepare(
-      `INSERT INTO favorites (user_id, item_type, item_id, title, subtitle, thumbnail, meta_json)
+    await db.execute(
+      `INSERT INTO ${favTable} (user_id, item_type, item_id, title, subtitle, thumbnail, meta_json)
        VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, item_type, item_id) DO UPDATE SET
          title = excluded.title,
          subtitle = excluded.subtitle,
          thumbnail = excluded.thumbnail,
-         meta_json = excluded.meta_json`
-    ).run(user.id, itemType, itemId, title, subtitle, safeThumbnail, metaJson);
+         meta_json = excluded.meta_json`,
+      [user.id, itemType, itemId, title, subtitle, safeThumbnail, metaJson]
+    );
 
-    const saved = db
-      .prepare(
-        `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
-         FROM favorites WHERE user_id = ? AND item_type = ? AND item_id = ?`
-      )
-      .get(user.id, itemType, itemId) as any;
+    const saved = (await db.queryOne<Record<string, any>>(
+      `SELECT id, item_type, item_id, title, subtitle, thumbnail, meta_json, created_at
+       FROM ${favTable} WHERE user_id = ? AND item_type = ? AND item_id = ?`,
+      [user.id, itemType, itemId]
+    )) as Record<string, any>;
 
-    sendJson(res, 200, {
-      favorite: {
-        id: saved.id,
-        itemType: saved.item_type,
-        itemId: saved.item_id,
-        title: saved.title,
-        subtitle: saved.subtitle || '',
-        thumbnail: isSafeHttpUrl(saved.thumbnail || ''),
-        meta: safeParseMetaObject(saved.meta_json),
-        createdAt: saved.created_at,
-      },
-    });
+    sendJson(res, 200, { favorite: serializeFavoriteRow(saved) });
     return true;
   }
 
@@ -139,9 +127,10 @@ export async function handleFavoriteRoutes(
       sendJson(res, 400, { error: 'Tham số type hoặc id không hợp lệ.' });
       return true;
     }
-    db.prepare(
-      'DELETE FROM favorites WHERE user_id = ? AND item_type = ? AND item_id = ?'
-    ).run(user.id, itemType, itemId);
+    await db.execute(
+      `DELETE FROM ${favTable} WHERE user_id = ? AND item_type = ? AND item_id = ?`,
+      [user.id, itemType, itemId]
+    );
     sendJson(res, 200, { ok: true });
     return true;
   }
