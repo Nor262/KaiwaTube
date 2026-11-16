@@ -1515,11 +1515,11 @@ export function App() {
 
   return (
     <div className="h-screen flex bg-[#0f0f0f] text-[#f3f2ef] overflow-hidden select-none">
-      {/* Left Sidebar (Collapsible) */}
+      {/* Left Sidebar (Desktop / Tablet Portrait only; Mobile uses Bottom Nav) */}
       <aside
-        className={`${
+        className={`hidden md:flex mobile-landscape-hide ${
           sidebarCollapsed ? 'w-16 items-center' : 'w-56'
-        } bg-[#141519] border-r border-white/[0.06] flex flex-col justify-between p-3 shrink-0 transition-all duration-200 select-none`}
+        } bg-[#141519] border-r border-white/[0.06] flex-col justify-between p-3 shrink-0 transition-all duration-200 select-none`}
       >
         <div className="space-y-5 w-full">
           {/* Logo & Collapse Button */}
@@ -1690,13 +1690,23 @@ export function App() {
       <div className="flex-1 flex flex-col min-w-0 relative">
         {/* Global Status Toast */}
         {statusToast && (
-          <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-[#1f222c] border border-[#e04f3e]/60 text-xs font-medium text-white shadow-2xl">
+          <div className="fixed bottom-16 md:bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl bg-[#1f222c] border border-[#e04f3e]/60 text-xs font-medium text-white shadow-2xl">
             {statusToast}
           </div>
         )}
 
         {/* Top Header (YouTube-style Search Bar) */}
-        <header className="h-14 border-b border-white/[0.06] bg-[#0f0f0f] px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 shrink-0">
+        <header className="h-14 mobile-landscape-header border-b border-white/[0.06] bg-[#0f0f0f] px-2.5 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 shrink-0">
+          <button
+            type="button"
+            onClick={goHome}
+            title="Về Trang chủ KaiwaTube"
+            className="md:hidden flex items-center justify-center w-10 h-10 rounded-lg shrink-0"
+          >
+            <div className="w-8 h-8 rounded-lg bg-[#e04f3e] flex items-center justify-center font-bold text-white text-base shadow-md">
+              日
+            </div>
+          </button>
           <div className="hidden lg:block w-16 shrink-0" />
 
           <form
@@ -1728,7 +1738,7 @@ export function App() {
               type="submit"
               title="Tìm kiếm"
               data-testid="header-search-submit"
-              className="px-3.5 sm:px-5 py-2 bg-[#222222] hover:bg-[#303030] border-l border-[#303030] text-[#f1f1f1] flex items-center justify-center transition-colors shrink-0"
+              className="min-w-[44px] min-h-[40px] px-3 sm:px-5 py-2 bg-[#222222] hover:bg-[#303030] border-l border-[#303030] text-[#f1f1f1] flex items-center justify-center transition-colors shrink-0"
             >
               <Search className="w-4 h-4" />
             </button>
@@ -1738,9 +1748,9 @@ export function App() {
             {appMode === 'watch' && (
               <label
                 title="Nạp .SRT / .VTT"
-                className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-full bg-[#222222] hover:bg-[#303030] text-xs font-medium cursor-pointer transition-colors"
+                className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] px-2.5 sm:px-3 py-1.5 rounded-full bg-[#222222] hover:bg-[#303030] text-xs font-medium cursor-pointer transition-colors"
               >
-                <Upload className="w-3.5 h-3.5 text-[#e04f3e]" />
+                <Upload className="w-4 h-4 text-[#e04f3e]" />
                 <span className="hidden sm:inline">Nạp .SRT / .VTT</span>
                 <input
                   type="file"
@@ -1753,10 +1763,10 @@ export function App() {
 
             <button
               onClick={() => setShowAuthModal(true)}
-              className="flex items-center gap-1.5 px-2.5 sm:px-3.5 py-1.5 rounded-full bg-[#222222] hover:bg-[#303030] text-xs font-semibold text-[#f7c873] transition-colors border border-white/10"
+              className="flex items-center justify-center gap-1.5 min-w-[40px] min-h-[40px] px-2.5 sm:px-3.5 py-1.5 rounded-full bg-[#222222] hover:bg-[#303030] text-xs font-semibold text-[#f7c873] transition-colors border border-white/10"
               title={currentUser ? currentUser.displayName : 'Đăng nhập'}
             >
-              <UserCheck className="w-3.5 h-3.5 text-[#e04f3e]" />
+              <UserCheck className="w-4 h-4 text-[#e04f3e]" />
               <span className="hidden sm:inline truncate max-w-[120px]">
                 {currentUser ? currentUser.displayName : 'Đăng nhập'}
               </span>
@@ -1852,10 +1862,10 @@ export function App() {
           />
         ) : (
           /* Watch Mode: Video + Subtitle + Right Learning Panel */
-          <div className="flex-1 flex flex-col lg:flex-row min-h-0 overflow-y-auto lg:overflow-hidden">
-            {/* Left Main Player Column */}
-            <main className="lg:flex-1 flex flex-col p-3 sm:p-4 gap-3 min-w-0 lg:overflow-y-auto">
-              <div className="flex items-center justify-between gap-3 text-sm font-semibold text-white">
+          <div className="flex-1 flex flex-col lg:flex-row mobile-landscape-row min-h-0 overflow-hidden">
+            {/* Left Main Player Column (pinned on mobile portrait, left column on landscape/desktop) */}
+            <main className="lg:flex-1 flex flex-col p-2.5 sm:p-4 gap-2 sm:gap-3 min-w-0 shrink-0 lg:shrink lg:overflow-y-auto mobile-landscape-player-col">
+              <div className="flex items-center justify-between gap-2 sm:gap-3 text-xs sm:text-sm font-semibold text-white mobile-landscape-hide">
                 <div className="flex items-center gap-2 min-w-0">
                   <span className="truncate">
                     {seriesTitle}
@@ -1874,7 +1884,7 @@ export function App() {
                   <button
                     type="button"
                     onClick={() => void handleToggleFavorite(currentMediaFavoritePayload)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-medium flex items-center gap-1.5 border transition-colors ${
+                    className={`min-h-[36px] px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 border transition-colors ${
                       isCurrentMediaFavorited
                         ? 'bg-[#e04f3e]/20 border-[#e04f3e] text-[#f7c873]'
                         : 'bg-[#1c1e24] border-[#2c303c] text-[#b4b9c8] hover:text-white hover:border-[#e04f3e]/60'
@@ -1893,7 +1903,7 @@ export function App() {
                 </div>
               </div>
 
-              <div className="w-full aspect-video bg-black rounded-xl overflow-hidden border border-[#262830] relative shadow-lg">
+              <div className="w-full aspect-video max-h-[30vh] sm:max-h-[42vh] lg:max-h-none bg-black rounded-xl overflow-hidden border border-[#262830] relative shadow-lg mobile-landscape-video-box">
                 <div id="youtube-player-element" className="w-full h-full" />
                 {subLoading && (
                   <div
@@ -1925,17 +1935,17 @@ export function App() {
                 onClick={() => {
                   if (activeCue) jumpToCue(activeCue);
                 }}
-                className="p-4 rounded-xl bg-[#1a1b20] border border-[#282a33] text-center space-y-2 min-h-[110px] flex flex-col justify-center relative shadow-sm cursor-pointer hover:border-[#383c4a] transition-colors"
+                className="p-2.5 sm:p-4 rounded-xl bg-[#1a1b20] border border-[#282a33] text-center space-y-1 sm:space-y-2 min-h-[72px] sm:min-h-[110px] max-h-[120px] sm:max-h-none overflow-y-auto flex flex-col justify-start relative shadow-sm cursor-pointer hover:border-[#383c4a] transition-colors mobile-landscape-subbox"
                 title="Bấm vào khung để phát lại từ đầu câu thoại này"
               >
                 {subLoading ? (
-                  <div className="flex items-center justify-center gap-2 text-sm text-[#8b909e]">
+                  <div className="my-auto flex items-center justify-center gap-2 text-xs sm:text-sm text-[#8b909e]">
                     <Loader2 className="w-4 h-4 animate-spin text-[#e04f3e]" />
                     Đang đồng bộ phụ đề tiếng Nhật & tiếng Việt...
                   </div>
                 ) : activeCue ? (
-                  <div className="space-y-1.5">
-                    <div className="text-2xl font-semibold text-[#f7c873] leading-relaxed tracking-wide">
+                  <div className="my-auto space-y-1">
+                    <div className="text-lg sm:text-2xl font-semibold text-[#f7c873] leading-snug sm:leading-relaxed tracking-wide mobile-landscape-subbox-ja">
                       <InteractiveJapaneseText
                         text={activeCue.ja}
                         apiKey={apiKey}
@@ -1945,7 +1955,7 @@ export function App() {
                       />
                     </div>
                     {activeCue.vi && (
-                      <div className="text-sm font-medium text-[#c8cdd9] leading-normal">
+                      <div className="text-xs sm:text-sm font-medium text-[#c8cdd9] leading-snug mobile-landscape-subbox-vi">
                         {activeCue.vi}
                       </div>
                     )}
@@ -1962,11 +1972,11 @@ export function App() {
                 )}
               </div>
 
-              {/* Learning Controls */}
-              <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3 py-1">
+              {/* Learning Controls (Touch targets >= 44x44px) */}
+              <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3 py-0.5">
                 <button
                   onClick={() => stepCue(-1)}
-                  className="p-2 rounded-lg bg-[#1f2128] hover:bg-[#2a2d37] text-[#d0d3dc] transition-colors"
+                  className="min-w-[44px] min-h-[44px] p-2.5 rounded-lg bg-[#1f2128] hover:bg-[#2a2d37] text-[#d0d3dc] flex items-center justify-center transition-colors"
                   title="Lùi 1 câu"
                 >
                   <SkipBack className="w-4 h-4" />
@@ -1977,7 +1987,7 @@ export function App() {
                       ? playerRef.current?.pauseVideo()
                       : playerRef.current?.playVideo()
                   }
-                  className="p-3 rounded-full bg-[#e04f3e] hover:bg-[#c94333] text-white shadow-md transition-all active:scale-95"
+                  className="w-12 h-12 rounded-full bg-[#e04f3e] hover:bg-[#c94333] text-white shadow-md flex items-center justify-center transition-all active:scale-95"
                 >
                   {isPlaying ? (
                     <Pause className="w-5 h-5" />
@@ -1987,14 +1997,14 @@ export function App() {
                 </button>
                 <button
                   onClick={() => stepCue(1)}
-                  className="p-2 rounded-lg bg-[#1f2128] hover:bg-[#2a2d37] text-[#d0d3dc] transition-colors"
+                  className="min-w-[44px] min-h-[44px] p-2.5 rounded-lg bg-[#1f2128] hover:bg-[#2a2d37] text-[#d0d3dc] flex items-center justify-center transition-colors"
                   title="Tiến 1 câu"
                 >
                   <SkipForward className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => setLoopCue((v) => !v)}
-                  className={`p-2 rounded-lg border text-xs flex items-center gap-1 transition-colors ${
+                  className={`min-w-[44px] min-h-[44px] p-2.5 rounded-lg border text-xs flex items-center justify-center gap-1 transition-colors ${
                     loopCue
                       ? 'bg-[#e04f3e]/20 border-[#e04f3e] text-[#e04f3e]'
                       : 'bg-[#1f2128] border-transparent text-[#a0a4b0]'
@@ -2006,17 +2016,18 @@ export function App() {
                 {(activeCue || selectedCue) && (
                   <button
                     onClick={() => handleAnalyzeCue((activeCue || selectedCue)!)}
-                    className="ml-2 px-3 py-2 rounded-lg bg-[#23252d] hover:bg-[#2f323d] text-xs font-semibold text-[#f7c873] flex items-center gap-1.5 whitespace-nowrap transition-colors border border-[#3e4350]"
+                    className="min-h-[44px] ml-1 px-3.5 py-2 rounded-lg bg-[#23252d] hover:bg-[#2f323d] text-xs font-semibold text-[#f7c873] flex items-center gap-1.5 whitespace-nowrap transition-colors border border-[#3e4350]"
                   >
                     <Sparkles className="w-3.5 h-3.5 text-[#e04f3e]" />
-                    AI Giải thích câu này
+                    <span className="hidden sm:inline">AI Giải thích câu này</span>
+                    <span className="sm:hidden">AI Giải thích</span>
                   </button>
                 )}
               </div>
             </main>
 
             {/* Right Panel: Transcript + Deep Analysis + Episodes/Playlist */}
-            <aside className="w-full lg:w-[460px] xl:w-[520px] 2xl:w-[580px] min-h-[420px] lg:min-h-0 border-t lg:border-t-0 lg:border-l border-[#262830] bg-[#17181c] flex flex-col shrink-0 transition-all duration-200">
+            <aside className="w-full flex-1 lg:flex-none lg:w-[460px] xl:w-[520px] 2xl:w-[580px] min-h-0 border-t lg:border-t-0 lg:border-l border-[#262830] bg-[#17181c] flex flex-col shrink-0 transition-all duration-200 mobile-landscape-right-panel">
               <div className="flex border-b border-[#262830] text-xs font-medium shrink-0">
                 <button
                   onClick={() => setRightTab('transcript')}
@@ -2268,6 +2279,73 @@ export function App() {
             </aside>
           </div>
         )}
+
+        {/* Mobile Portrait Bottom Navigation Bar (Thumb Zone, >= 44px touch targets) */}
+        <nav
+          aria-label="Điều hướng di động"
+          className="md:hidden mobile-landscape-hide h-14 border-t border-white/[0.08] bg-[#141519] px-1 flex items-center justify-around shrink-0"
+        >
+          <button
+            type="button"
+            onClick={goHome}
+            className={`flex-1 min-h-[48px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors ${
+              appMode === 'home' ? 'text-[#e04f3e]' : 'text-[#a0a4b0]'
+            }`}
+          >
+            <Home className="w-4 h-4" />
+            <span>Trang chủ</span>
+          </button>
+
+          {videoId && (
+            <button
+              type="button"
+              onClick={returnToWatchPlayer}
+              className={`flex-1 min-h-[48px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors ${
+                appMode === 'watch' ? 'text-[#e04f3e]' : 'text-[#a0a4b0]'
+              }`}
+            >
+              <Play className="w-4 h-4" />
+              <span>Đang phát</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setAppMode('search');
+              pushAppUrl({ mode: 'search', q: searchQuery });
+            }}
+            className={`flex-1 min-h-[48px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors ${
+              appMode === 'search' ? 'text-[#e04f3e]' : 'text-[#a0a4b0]'
+            }`}
+          >
+            <Search className="w-4 h-4" />
+            <span>Tìm kiếm</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setAppMode('favorites');
+              pushAppUrl({ mode: 'favorites' });
+            }}
+            className={`flex-1 min-h-[48px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium transition-colors ${
+              appMode === 'favorites' ? 'text-[#e04f3e]' : 'text-[#a0a4b0]'
+            }`}
+          >
+            <Heart className="w-4 h-4" />
+            <span>Yêu thích</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowSettings(true)}
+            className="flex-1 min-h-[48px] flex flex-col items-center justify-center gap-0.5 text-[11px] font-medium text-[#a0a4b0] transition-colors"
+          >
+            <Settings className="w-4 h-4" />
+            <span>Cài đặt</span>
+          </button>
+        </nav>
       </div>
 
       {/* Modals */}
