@@ -35,11 +35,19 @@ Mở trình duyệt tại địa chỉ Vite hiển thị (mặc định `http://
 
 Xem mẫu tại [`.env.example`](./.env.example):
 
+- `POSTGRES_URL` / `DATABASE_URL` *(khuyên dùng khi deploy Vercel)*: Chuỗi kết nối Supabase PostgreSQL (Transaction Pooler), tự động dùng schema `kaiwatube` từ [`supabase/migrations/0001_kaiwatube_schema.sql`](./supabase/migrations/0001_kaiwatube_schema.sql).
+- `KAIWATUBE_DB_SCHEMA` *(tùy chọn)*: Tên schema PostgreSQL (mặc định `kaiwatube`).
 - `ADMIN_SECRET`: Mã bí mật dùng để kích hoạt quyền Admin khi đăng ký hoặc nâng cấp tài khoản.
-- `JWT_SECRET`: Khóa ký phiên đăng nhập (nếu bỏ trống sẽ tự sinh ngẫu nhiên và lưu trong SQLite).
-- `NIHONGO_DB_PATH` *(tùy chọn)*: Đường dẫn file SQLite (mặc định `nihongo.db` ở thư mục gốc, trên Railway Volume đặt `/data/nihongo.db`).
-- `TRUST_PROXY` *(tùy chọn)*: Đặt `1` khi chạy sau Reverse Proxy (Railway/Caddy/Nginx) để rate-limit đọc đúng IP khách hàng.
+- `JWT_SECRET`: Khóa ký phiên đăng nhập (nếu bỏ trống sẽ tự sinh ngẫu nhiên và lưu trong DB).
+- `NIHONGO_DB_PATH` *(tùy chọn)*: Đường dẫn file SQLite khi chạy local/Docker (mặc định `nihongo.db`).
+- `TRUST_PROXY` *(tùy chọn)*: Đặt `1` khi chạy sau Reverse Proxy (Vercel/Caddy/Nginx) để rate-limit đọc đúng IP khách hàng.
 - `PORT` / `HOST` *(tùy chọn)*: Cổng và địa chỉ lắng nghe của production server (mặc định `0.0.0.0:3000`).
+
+## Deploy Supabase + Vercel
+
+1. Chạy migration [`supabase/migrations/0001_kaiwatube_schema.sql`](./supabase/migrations/0001_kaiwatube_schema.sql) trên project Supabase (schema `kaiwatube` có bật RLS).
+2. Cấu hình biến môi trường trên Vercel: `POSTGRES_URL` (hoặc kết nối Supabase Integration), `JWT_SECRET`, `ADMIN_SECRET`.
+3. Vercel tự build SPA (`npm run build:client`) vào `dist/` và phục vụ toàn bộ `/api/*` qua [`api/index.ts`](./api/index.ts) + [`vercel.json`](./vercel.json).
 
 ## Build & Chạy Production
 
