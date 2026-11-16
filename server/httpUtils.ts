@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { HttpError, applyCommonSecurityHeaders } from './security';
+import { HttpError, applyCommonSecurityHeaders } from './security.js';
 
 export function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.statusCode = status;

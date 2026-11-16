@@ -1,13 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { getDb, normalizeDbTimestamp } from './db';
-import { canPublishCommunitySub, getAuthUser } from './auth';
-import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
+import { getDb, normalizeDbTimestamp } from './db.js';
+import { canPublishCommunitySub, getAuthUser } from './auth.js';
+import { getRequestUrl, readJsonBody, sendJson } from './httpUtils.js';
 import {
   HttpError,
   isValidYouTubeVideoId,
   parsePositiveIntId,
   sanitizeText,
-} from './security';
+} from './security.js';
 
 const MAX_SUBTITLE_BODY_BYTES = 4 * 1024 * 1024;
 const ALLOWED_SUB_SOURCE_TYPES = new Set(['ai_merged', 'uploaded']);

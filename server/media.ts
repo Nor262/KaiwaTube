@@ -1,9 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { YoutubeTranscript } from 'youtube-transcript';
 import yts from 'yt-search';
-import { canPublishCommunitySub, getAuthUser } from './auth';
-import { getDb } from './db';
-import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
+import { canPublishCommunitySub, getAuthUser } from './auth.js';
+import { getDatabaseUrl, getDb } from './db.js';
+import { getRequestUrl, readJsonBody, sendJson } from './httpUtils.js';
 import {
   BoundedTtlCache,
   HttpError,
@@ -17,8 +17,8 @@ import {
   isValidYouTubePlaylistId,
   isValidYouTubeVideoId,
   sanitizeText,
-} from './security';
-import { normalizeSubtitleCueTimings } from '../src/services/subtitleTiming';
+} from './security.js';
+import { normalizeSubtitleCueTimings } from '../src/services/subtitleTiming.js';
 
 const kanjiCache = new BoundedTtlCache<string, any>(500, 60 * 60 * 1000);
 const subCache = new BoundedTtlCache<string, any[]>(120, 30 * 60 * 1000);
@@ -551,11 +551,18 @@ export async function fetchAkaiwaSeries(slug: string, ep: number = 1) {
 }
 
 async function getStoredMnemonic(kanji: string) {
-  const db = await getDb();
-  return db.queryOne<{ kanji: string; han_viet: string; decomposition: string; mnemonic: string }>(
-    `SELECT kanji, han_viet, decomposition, mnemonic FROM ${db.table('kanji_mnemonics')} WHERE kanji = ?`,
-    [kanji]
-  );
+  if (!getDatabaseUrl() && process.env.VERCEL === '1') {
+    return undefined;
+  }
+  try {
+    const db = await getDb();
+    return db.queryOne<{ kanji: string; han_viet: string; decomposition: string; mnemonic: string }>(
+      `SELECT kanji, han_viet, decomposition, mnemonic FROM ${db.table('kanji_mnemonics')} WHERE kanji = ?`,
+      [kanji]
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 export async function handleMediaRoutes(

@@ -6,9 +6,9 @@ import {
   normalizeDbTimestamp,
   type DbUser,
   type UserRole,
-} from './db';
-import { getEnvVar } from './env';
-import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
+} from './db.js';
+import { getEnvVar } from './env.js';
+import { getRequestUrl, readJsonBody, sendJson } from './httpUtils.js';
 import {
   SlidingWindowRateLimiter,
   enforceRateLimit,
@@ -16,7 +16,7 @@ import {
   getClientIp,
   parsePositiveIntId,
   sanitizeText,
-} from './security';
+} from './security.js';
 
 const JWT_ISSUER = 'kaiwatube';
 const JWT_AUDIENCE = 'kaiwatube-client';
