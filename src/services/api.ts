@@ -261,17 +261,59 @@ export async function fetchYouTubeVideoApi(videoId: string): Promise<{
   return apiFetch(`/api/yt-video?v=${encodeURIComponent(videoId)}`);
 }
 
+async function translateDirectClientFallback(texts: string[]): Promise<string[]> {
+  if (!texts.length) return [];
+  const chunkSize = 30;
+  const output: string[] = [];
+
+  for (let i = 0; i < texts.length; i += chunkSize) {
+    const chunk = texts.slice(i, i + chunkSize);
+    const combined = chunk.join('\n|||\n');
+    try {
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=ja&tl=vi&dt=t&q=${encodeURIComponent(
+        combined
+      )}`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+      if (!res.ok) {
+        output.push(...chunk.map(() => ''));
+        continue;
+      }
+      const data = await res.json();
+      const fullTranslated = (data?.[0] || []).map((item: any) => item?.[0] || '').join('');
+      const parts = fullTranslated.split(/\s*\|\|\|\s*/);
+      for (let j = 0; j < chunk.length; j++) {
+        output.push((parts[j] || '').trim());
+      }
+    } catch {
+      output.push(...chunk.map(() => ''));
+    }
+  }
+  return output;
+}
+
 export async function translateBatchServer(texts: string[]): Promise<string[]> {
   if (!texts.length) return [];
   const BATCH_LIMIT = 150;
   const output: string[] = [];
+
   for (let i = 0; i < texts.length; i += BATCH_LIMIT) {
     const slice = texts.slice(i, i + BATCH_LIMIT);
-    const data = await apiFetch<{ translations: string[] }>('/api/translate-batch', {
-      method: 'POST',
-      body: JSON.stringify({ texts: slice }),
-    });
-    const chunkOut = Array.isArray(data.translations) ? data.translations : slice.map(() => '');
+    let chunkOut: string[] = [];
+    try {
+      const data = await apiFetch<{ translations: string[] }>('/api/translate-batch', {
+        method: 'POST',
+        body: JSON.stringify({ texts: slice }),
+      });
+      chunkOut = Array.isArray(data.translations) ? data.translations : [];
+    } catch {
+      chunkOut = [];
+    }
+
+    const hasNonEmpty = chunkOut.some((t) => Boolean(t && t.trim()));
+    if (!hasNonEmpty && slice.some((t) => Boolean(t && t.trim()))) {
+      chunkOut = await translateDirectClientFallback(slice);
+    }
+
     for (let j = 0; j < slice.length; j++) {
       output.push(chunkOut[j] || '');
     }
