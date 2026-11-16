@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getDb } from '../server/db.js';
 import { getRequestUrl, sendJson } from '../server/httpUtils.js';
 import { ensureServerInit, handleApiRequest } from '../server/index.js';
-import { applyCommonSecurityHeaders } from '../server/security.js';
+import { applyApiCorsHeaders, applyCommonSecurityHeaders } from '../server/security.js';
 
 export const config = {
   runtime: 'nodejs',
@@ -34,6 +34,7 @@ export default async function handler(
 ): Promise<void> {
   ensureServerInit();
   applyCommonSecurityHeaders(res);
+  if (applyApiCorsHeaders(req, res)) return;
 
   const resolvedUrl = resolveRewrittenApiUrl(req.url || '/api');
   if (!resolvedUrl) {

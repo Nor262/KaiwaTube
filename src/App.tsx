@@ -1,4 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
+import { StatusBar, Style } from '@capacitor/status-bar';
 import {
   Play,
   Pause,
@@ -86,6 +89,7 @@ import { FavoritesView } from './components/FavoritesView';
 import { SubtitleControlBar } from './components/SubtitleControlBar';
 import { AnalysisTabPanel } from './components/AnalysisTabPanel';
 import { SettingsModal } from './components/SettingsModal';
+import { fetchMobileYouTubeSubtitles } from './services/mobileYouTubeTranscript';
 
 const RECENT_STORAGE_KEY = 'nihongo_recent_watch';
 
@@ -244,6 +248,44 @@ export function App() {
       timeDisplayRef.current.textContent = formatPlaybackClock(currentTimeRef.current);
     }
   }, [appMode, videoId]);
+
+  const modalStateRef = useRef({ showAuthModal, showAdminModal, showSettings });
+  modalStateRef.current = { showAuthModal, showAdminModal, showSettings };
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    void StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+    void StatusBar.setBackgroundColor({ color: '#121316' }).catch(() => {});
+
+    let handle: { remove: () => Promise<void> } | null = null;
+    void CapacitorApp.addListener('backButton', () => {
+      const modals = modalStateRef.current;
+      if (modals.showAdminModal) {
+        setShowAdminModal(false);
+        return;
+      }
+      if (modals.showAuthModal) {
+        setShowAuthModal(false);
+        return;
+      }
+      if (modals.showSettings) {
+        setShowSettings(false);
+        return;
+      }
+      if (appModeRef.current !== 'home') {
+        setAppMode('home');
+        replaceAppUrl({ mode: 'home' });
+        return;
+      }
+      void CapacitorApp.exitApp();
+    }).then((h) => {
+      handle = h;
+    });
+
+    return () => {
+      if (handle) void handle.remove();
+    };
+  }, []);
 
   useEffect(() => {
     appModeRef.current = appMode;
@@ -888,6 +930,15 @@ export function App() {
           activateSavedFallbackTrack('user_saved', fallbackPersonal);
         } else if (fallbackCommunity) {
           activateSavedFallbackTrack('community', fallbackCommunity);
+        } else if (Capacitor.isNativePlatform()) {
+          const mobileCues = await fetchMobileYouTubeSubtitles(vid);
+          if (seq !== loadSeqRef.current) return;
+          if (mobileCues.length > 0) {
+            resetSubtitlesToYouTubeDefault(mobileCues);
+            setSubError(null);
+          } else {
+            setSubError('Video YouTube này không có phụ đề (CC). Hãy nạp file .SRT/.VTT hoặc chọn video khác.');
+          }
         } else {
           setSubError(subRes.error || 'Video YouTube này không có phụ đề CC.');
         }

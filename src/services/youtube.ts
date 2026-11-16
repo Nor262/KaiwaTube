@@ -1,5 +1,5 @@
 import { SubtitleCue, PlaylistItem } from '../types';
-import { fetchYouTubePlaylistApi, fetchYouTubeVideoApi } from './api';
+import { fetchYouTubePlaylistApi, fetchYouTubeVideoApi, resolveApiUrl } from './api';
 import {
   findActiveSubtitleCue,
   findCueAtOrBeforeTime,
@@ -147,7 +147,7 @@ export async function fetchAkaiwaSeriesData(slug: string, ep: number = 1): Promi
   error?: string;
 }> {
   try {
-    const res = await fetch(`/api/akaiwa?slug=${encodeURIComponent(slug)}&ep=${ep}`);
+    const res = await fetch(resolveApiUrl(`/api/akaiwa?slug=${encodeURIComponent(slug)}&ep=${ep}`));
     const data = await res.json();
     if (data.error) throw new Error(data.error);
 
@@ -202,7 +202,7 @@ export async function fetchSubtitlesForVideo(videoId: string): Promise<{
   error?: string;
 }> {
   try {
-    const res = await fetch(`/api/yt-subtitles?v=${encodeURIComponent(videoId)}`);
+    const res = await fetch(resolveApiUrl(`/api/yt-subtitles?v=${encodeURIComponent(videoId)}`));
     const data = await res.json();
     return {
       cues: Array.isArray(data?.cues) ? normalizeCueTimings(data.cues) : [],

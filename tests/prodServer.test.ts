@@ -242,4 +242,26 @@ describe('Production HTTP server & Vercel Serverless adapter', () => {
     await vercelHandler(badPathReq, badPathRes.res);
     expect(badPathRes.getStatus()).toBe(400);
   });
+
+  it('allows Capacitor mobile origins via CORS and responds 204 to OPTIONS preflight', async () => {
+    const preflightReq = createMockVercelReq({
+      url: '/api/index?__kaiwa_path=health',
+      method: 'OPTIONS',
+      headers: { origin: 'https://localhost' },
+    });
+    const preflightRes = createMockVercelRes();
+    await vercelHandler(preflightReq, preflightRes.res);
+    expect(preflightRes.getStatus()).toBe(204);
+    expect(preflightRes.getHeaders()['access-control-allow-origin']).toBe('https://localhost');
+
+    const untrustedReq = createMockVercelReq({
+      url: '/api/index?__kaiwa_path=health',
+      method: 'OPTIONS',
+      headers: { origin: 'https://evil.example.com' },
+    });
+    const untrustedRes = createMockVercelRes();
+    await vercelHandler(untrustedReq, untrustedRes.res);
+    expect(untrustedRes.getStatus()).toBe(204);
+    expect(untrustedRes.getHeaders()['access-control-allow-origin']).toBeUndefined();
+  });
 });

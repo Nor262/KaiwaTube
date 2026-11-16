@@ -232,6 +232,39 @@ export function applyCommonSecurityHeaders(res: ServerResponse): void {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 }
 
+const DEFAULT_MOBILE_ORIGINS = new Set([
+  'https://localhost',
+  'http://localhost',
+  'capacitor://localhost',
+]);
+
+/**
+ * Allows Capacitor mobile WebView origins (and optional CORS_ORIGIN overrides)
+ * to call /api/* routes, and responds cleanly to CORS OPTIONS preflight requests.
+ */
+export function applyApiCorsHeaders(req: IncomingMessage, res: ServerResponse): boolean {
+  const origin = typeof req.headers.origin === 'string' ? req.headers.origin.trim() : '';
+  const extraOrigins = (process.env.CORS_ORIGIN || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (origin && (DEFAULT_MOBILE_ORIGINS.has(origin) || extraOrigins.includes(origin))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Max-Age', '86400');
+  }
+
+  if ((req.method || 'GET').toUpperCase() === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return true;
+  }
+  return false;
+}
+
 export function buildAppCspHeader(isDev: boolean): string {
   const connectSources = [
     "'self'",

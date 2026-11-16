@@ -1,4 +1,5 @@
 import { BoundedMemoryCache, sanitizeAiText } from '../utils/aiSecurity';
+import { resolveApiUrl } from './api';
 
 export interface KanjiInfo {
   type: 'kanji';
@@ -59,7 +60,7 @@ export async function lookupKanji(char: string): Promise<KanjiInfo | null> {
   }
 
   try {
-    const res = await fetch(`/api/kanji?q=${encodeURIComponent(safeChar)}&type=kanji`);
+    const res = await fetch(resolveApiUrl(`/api/kanji?q=${encodeURIComponent(safeChar)}&type=kanji`));
     if (!res.ok) return null;
     const data = await res.json();
     if (data && !data.notFound) {
@@ -82,7 +83,7 @@ export async function lookupWord(word: string): Promise<WordInfo | null> {
   }
 
   try {
-    const res = await fetch(`/api/kanji?q=${encodeURIComponent(safeWord)}&type=word`);
+    const res = await fetch(resolveApiUrl(`/api/kanji?q=${encodeURIComponent(safeWord)}&type=word`));
     if (!res.ok) return null;
     const data = await res.json();
     if (data && !data.notFound) {

@@ -12,6 +12,21 @@ import {
 } from '../types';
 
 const TOKEN_STORAGE_KEY = 'nihongo_auth_token';
+const API_BASE_OVERRIDE_KEY = 'kaiwatube_api_base_url';
+
+export function resolveApiUrl(path: string): string {
+  if (!path.startsWith('/api/')) return path;
+  const runtimeOverride =
+    typeof window !== 'undefined'
+      ? (localStorage.getItem(API_BASE_OVERRIDE_KEY) || '').trim()
+      : '';
+  const envBase = String(
+    (import.meta as { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL || ''
+  ).trim();
+  const base = (runtimeOverride || envBase).replace(/\/+$/, '');
+  if (!base || !/^https?:\/\//i.test(base)) return path;
+  return `${base}${path}`;
+}
 
 export function getAuthToken(): string {
   return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
@@ -35,7 +50,7 @@ async function apiFetch<T>(url: string, options: RequestInit = {}): Promise<T> {
     headers.set('Authorization', `Bearer ${token}`);
   }
 
-  const res = await fetch(url, { ...options, headers });
+  const res = await fetch(resolveApiUrl(url), { ...options, headers });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     throw new Error(data?.error || `Lỗi máy chủ (${res.status})`);
