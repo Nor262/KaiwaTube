@@ -14,7 +14,8 @@
     "build": "tsc && vite build && esbuild server/prod.ts --bundle --platform=node --format=esm --packages=external --outfile=dist-server/prod.mjs",
     "start": "node dist-server/prod.mjs",
     "preview": "vite preview",
-    "test": "bun test"
+    "test": "bun test",
+    "seed:subs": "bun run scripts/seed-subtitles.ts"
   },
   "dependencies": {
     "@vercel/functions": "^3.11.3",

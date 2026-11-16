@@ -314,13 +314,14 @@ export function App() {
 
   // Refresh saved tracks for active videoId whenever videoId or auth user changes
   const refreshSavedTracks = useCallback(async (vid: string) => {
-    if (!vid) return;
+    if (!vid) return null;
     try {
       const tracks = await fetchVideoSubtitles(vid);
       setCommunityTracks(tracks.community || []);
       setPersonalTracks(tracks.personal || []);
+      return tracks;
     } catch {
-      // Ignore transient errors
+      return null;
     }
   }, []);
 
@@ -670,6 +671,29 @@ export function App() {
     }
   };
 
+  const activateSavedFallbackTrack = (
+    kind: 'user_saved' | 'community',
+    track: SavedSubtitleTrack
+  ) => {
+    const normalized = normalizeCueTimings(track.cues);
+    setCues(normalized);
+    cuesRef.current = normalized;
+    setActiveSourceKind(kind);
+    setActiveTrackId(track.id);
+    setSessionAiTrack(null);
+    setSessionUploadTrack(null);
+    setEditMode(false);
+    setHasUnsavedEdits(false);
+    lastCueRef.current = null;
+
+    const targetTime = pendingSeekTimeRef.current;
+    const activeMatch = targetTime > 0 ? findRestoreCueForTime(normalized, targetTime) : null;
+    setSelectedCue(activeMatch || normalized[0] || null);
+    setActiveCue(activeMatch);
+    if (activeMatch) lastCueRef.current = activeMatch;
+    setSubError(null);
+  };
+
   // --- Apply & Immediately Re-Sync Active Cue When Switching/Updating Tracks ---
   const applyTrackCues = (rawNext: SubtitleCue[]): SubtitleCue[] => {
     const normalized = normalizeCueTimings(rawNext);
@@ -829,7 +853,7 @@ export function App() {
 
     // Fetch subtitles & metadata BEFORE starting video playback so image and subtitles start in sync
     try {
-      const [subRes, meta] = await Promise.all([
+      const [subRes, meta, savedTracks] = await Promise.all([
         fetchSubtitlesForVideo(vid),
         fetchVideoMetadata(vid),
         refreshSavedTracks(vid),
@@ -858,7 +882,15 @@ export function App() {
 
       resetSubtitlesToYouTubeDefault(subRes.cues);
       if (subRes.cues.length === 0) {
-        setSubError(subRes.error || 'Video YouTube này không có phụ đề CC.');
+        const fallbackPersonal = savedTracks?.personal?.find((t) => (t.cues?.length || 0) > 0);
+        const fallbackCommunity = savedTracks?.community?.find((t) => (t.cues?.length || 0) > 0);
+        if (fallbackPersonal) {
+          activateSavedFallbackTrack('user_saved', fallbackPersonal);
+        } else if (fallbackCommunity) {
+          activateSavedFallbackTrack('community', fallbackCommunity);
+        } else {
+          setSubError(subRes.error || 'Video YouTube này không có phụ đề CC.');
+        }
       }
 
       subLoadingRef.current = false;

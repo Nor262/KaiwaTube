@@ -1,3 +1,4 @@
+/// <reference path="./ambient.d.ts" />
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { YoutubeTranscript } from 'youtube-transcript';
 import yts from 'yt-search';
