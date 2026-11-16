@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,11 +17,18 @@ export interface DbUser {
 
 let dbInstance: DatabaseSync | null = null;
 
+export function getDbPath(): string {
+  const customPath = getEnvVar('NIHONGO_DB_PATH');
+  return customPath || path.join(PROJECT_ROOT, 'nihongo.db');
+}
+
 export function getDb(): DatabaseSync {
   if (dbInstance) return dbInstance;
 
-  const customPath = getEnvVar('NIHONGO_DB_PATH');
-  const dbPath = customPath || path.join(PROJECT_ROOT, 'nihongo.db');
+  const dbPath = getDbPath();
+  if (dbPath !== ':memory:') {
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  }
 
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL;');
@@ -104,6 +112,20 @@ export function getDb(): DatabaseSync {
 
   dbInstance = db;
   return dbInstance;
+}
+
+export function closeDb(): void {
+  if (!dbInstance) return;
+  try {
+    dbInstance.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  } catch {
+    // Best-effort WAL checkpoint during container shutdown
+  }
+  try {
+    dbInstance.close();
+  } finally {
+    dbInstance = null;
+  }
 }
 
 export function getJwtSecret(): string {
