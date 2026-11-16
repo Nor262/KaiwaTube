@@ -1,11 +1,11 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { loadEnv } from './env';
-import { handleAuthRoutes } from './auth';
-import { handleMediaRoutes } from './media';
-import { handleSubtitleRoutes } from './subtitlesApi';
-import { handleFavoriteRoutes } from './favoritesApi';
-import { getRequestUrl, sendJson } from './httpUtils';
-import { HttpError } from './security';
+import { loadEnv } from './env.js';
+import { handleAuthRoutes } from './auth.js';
+import { handleMediaRoutes } from './media.js';
+import { handleSubtitleRoutes } from './subtitlesApi.js';
+import { handleFavoriteRoutes } from './favoritesApi.js';
+import { getRequestUrl, sendJson } from './httpUtils.js';
+import { HttpError } from './security.js';
 
 let initialized = false;
 

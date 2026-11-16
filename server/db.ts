@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Pool, type PoolConfig } from 'pg';
 import { attachDatabasePool } from '@vercel/functions';
-import { PROJECT_ROOT, getEnvVar } from './env';
+import { PROJECT_ROOT, getEnvVar } from './env.js';
 
 export type UserRole = 'user' | 'contributor' | 'admin';
 
@@ -293,6 +293,10 @@ async function createSqliteClient(dbPath: string): Promise<DbClient> {
 
 export async function getDb(): Promise<DbClient> {
   const dbUrl = getDatabaseUrl();
+  if (!dbUrl && process.env.VERCEL === '1') {
+    throw new Error('POSTGRES_URL or DATABASE_URL is required on Vercel.');
+  }
+
   const nextKey = dbUrl
     ? `postgres:${dbUrl}:${getDbSchema()}`
     : `sqlite:${getDbPath()}`;

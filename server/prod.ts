@@ -2,11 +2,11 @@ import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { closeDb, getDb, getDbPath } from './db';
-import { PROJECT_ROOT, getEnvVar } from './env';
-import { getRequestUrl, sendJson } from './httpUtils';
-import { ensureServerInit, handleApiRequest } from './index';
-import { applyCommonSecurityHeaders, buildAppCspHeader } from './security';
+import { closeDb, getDb, getDbPath } from './db.js';
+import { PROJECT_ROOT, getEnvVar } from './env.js';
+import { getRequestUrl, sendJson } from './httpUtils.js';
+import { ensureServerInit, handleApiRequest } from './index.js';
+import { applyCommonSecurityHeaders, buildAppCspHeader } from './security.js';
 
 const MIME_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',

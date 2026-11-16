@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { getDb } from '../server/db';
-import { getRequestUrl, sendJson } from '../server/httpUtils';
-import { ensureServerInit, handleApiRequest } from '../server/index';
-import { applyCommonSecurityHeaders } from '../server/security';
+import { getDb } from '../server/db.js';
+import { getRequestUrl, sendJson } from '../server/httpUtils.js';
+import { ensureServerInit, handleApiRequest } from '../server/index.js';
+import { applyCommonSecurityHeaders } from '../server/security.js';
 
 export const config = {
   runtime: 'nodejs',

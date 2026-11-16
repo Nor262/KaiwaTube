@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { ensureServerInit, handleApiRequest } from './server/index';
-import { applyCommonSecurityHeaders, buildAppCspHeader } from './server/security';
+import { ensureServerInit, handleApiRequest } from './server/index.js';
+import { applyCommonSecurityHeaders, buildAppCspHeader } from './server/security.js';
 
 function createMiddleware(isDev: boolean) {
   const cspHeader = buildAppCspHeader(isDev);

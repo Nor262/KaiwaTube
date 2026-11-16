@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { getDb, normalizeDbTimestamp } from './db';
-import { getAuthUser } from './auth';
-import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
-import { isSafeHttpUrl, isValidItemId, sanitizeText } from './security';
+import { getDb, normalizeDbTimestamp } from './db.js';
+import { getAuthUser } from './auth.js';
+import { getRequestUrl, readJsonBody, sendJson } from './httpUtils.js';
+import { isSafeHttpUrl, isValidItemId, sanitizeText } from './security.js';
 
 const ALLOWED_FAVORITE_TYPES = new Set(['video', 'playlist', 'anime']);
 
