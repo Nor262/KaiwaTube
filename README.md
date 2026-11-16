@@ -37,10 +37,26 @@ Xem mẫu tại [`.env.example`](./.env.example):
 
 - `ADMIN_SECRET`: Mã bí mật dùng để kích hoạt quyền Admin khi đăng ký hoặc nâng cấp tài khoản.
 - `JWT_SECRET`: Khóa ký phiên đăng nhập (nếu bỏ trống sẽ tự sinh ngẫu nhiên và lưu trong SQLite).
-- `NIHONGO_DB_PATH` *(tùy chọn)*: Đường dẫn file SQLite (mặc định là `nihongo.db` ở thư mục gốc dự án).
+- `NIHONGO_DB_PATH` *(tùy chọn)*: Đường dẫn file SQLite (mặc định `nihongo.db` ở thư mục gốc, trên Railway Volume đặt `/data/nihongo.db`).
+- `TRUST_PROXY` *(tùy chọn)*: Đặt `1` khi chạy sau Reverse Proxy (Railway/Caddy/Nginx) để rate-limit đọc đúng IP khách hàng.
+- `PORT` / `HOST` *(tùy chọn)*: Cổng và địa chỉ lắng nghe của production server (mặc định `0.0.0.0:3000`).
 
-## Build kiểm tra
+## Build & Chạy Production
 
 ```bash
 bun run build
+bun run start
+```
+
+Hoặc chạy qua Docker (`node:24-slim` + volume `/data`):
+
+```bash
+docker build -t kaiwatube .
+docker run -d -p 3000:3000 -v kaiwatube_data:/data -e JWT_SECRET=... -e ADMIN_SECRET=... kaiwatube
+```
+
+## Kiểm thử
+
+```bash
+bun test
 ```

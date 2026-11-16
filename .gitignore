@@ -5,6 +5,7 @@ bun.lockb
 
 # Build outputs
 dist/
+dist-server/
 build/
 .output/
 
