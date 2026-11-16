@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { getDb } from './db';
+import { getDb, normalizeDbTimestamp } from './db';
 import { canPublishCommunitySub, getAuthUser } from './auth';
 import { getRequestUrl, readJsonBody, sendJson } from './httpUtils';
 import {
@@ -27,6 +27,35 @@ function safeParseCuesJson(rawJson: string | null | undefined): NormalizedCue[] 
   } catch {
     return [];
   }
+}
+
+function serializeCommunityTrack(row: Record<string, any>) {
+  return {
+    id: Number(row.id),
+    videoId: row.video_id,
+    title: row.title,
+    sourceType: row.source_type,
+    authorId: row.author_id != null ? Number(row.author_id) : null,
+    authorName: row.author_name,
+    cueCount: Number(row.cue_count),
+    reportCount: Number(row.report_count || 0),
+    createdAt: normalizeDbTimestamp(row.created_at),
+    updatedAt: normalizeDbTimestamp(row.updated_at),
+    cues: safeParseCuesJson(row.cues_json),
+  };
+}
+
+function serializePersonalTrack(row: Record<string, any>) {
+  return {
+    id: Number(row.id),
+    videoId: row.video_id,
+    title: row.title,
+    sourceType: row.source_type,
+    cueCount: Number(row.cue_count),
+    createdAt: normalizeDbTimestamp(row.created_at),
+    updatedAt: normalizeDbTimestamp(row.updated_at),
+    cues: safeParseCuesJson(row.cues_json),
+  };
 }
 
 function validateAndNormalizeCues(rawCues: unknown): NormalizedCue[] {
@@ -68,7 +97,12 @@ export async function handleSubtitleRoutes(
   res: ServerResponse,
   pathname: string
 ): Promise<boolean> {
-  const db = getDb();
+  if (!pathname.startsWith('/api/subtitles')) return false;
+
+  const db = await getDb();
+  const communityTable = db.table('community_subtitles');
+  const userSubTable = db.table('user_subtitles');
+  const reportsTable = db.table('subtitle_reports');
   const method = (req.method || 'GET').toUpperCase();
   const url = getRequestUrl(req);
 
@@ -80,54 +114,30 @@ export async function handleSubtitleRoutes(
       return true;
     }
 
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
 
-    const communityRows = db
-      .prepare(
-        `SELECT cs.id, cs.video_id, cs.title, cs.source_type, cs.author_id, cs.author_name,
-                cs.cues_json, cs.cue_count, cs.created_at, cs.updated_at,
-                (SELECT COUNT(*) FROM subtitle_reports r WHERE r.community_sub_id = cs.id) AS report_count
-         FROM community_subtitles cs
-         WHERE cs.video_id = ?
-         ORDER BY cs.updated_at DESC LIMIT 50`
-      )
-      .all(videoId) as any[];
+    const communityRows = await db.queryAll<Record<string, any>>(
+      `SELECT cs.id, cs.video_id, cs.title, cs.source_type, cs.author_id, cs.author_name,
+              cs.cues_json, cs.cue_count, cs.created_at, cs.updated_at,
+              (SELECT COUNT(*) FROM ${reportsTable} r WHERE r.community_sub_id = cs.id) AS report_count
+       FROM ${communityTable} cs
+       WHERE cs.video_id = ?
+       ORDER BY cs.updated_at DESC LIMIT 50`,
+      [videoId]
+    );
 
-    const community = communityRows.map((row) => ({
-      id: row.id,
-      videoId: row.video_id,
-      title: row.title,
-      sourceType: row.source_type,
-      authorId: row.author_id,
-      authorName: row.author_name,
-      cueCount: row.cue_count,
-      reportCount: row.report_count || 0,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      cues: safeParseCuesJson(row.cues_json),
-    }));
+    const community = communityRows.map(serializeCommunityTrack);
 
-    let personal: any[] = [];
+    let personal: ReturnType<typeof serializePersonalTrack>[] = [];
     if (user) {
-      const userRows = db
-        .prepare(
-          `SELECT id, video_id, title, source_type, cues_json, cue_count, created_at, updated_at
-           FROM user_subtitles
-           WHERE user_id = ? AND video_id = ?
-           ORDER BY updated_at DESC LIMIT 20`
-        )
-        .all(user.id, videoId) as any[];
-
-      personal = userRows.map((row) => ({
-        id: row.id,
-        videoId: row.video_id,
-        title: row.title,
-        sourceType: row.source_type,
-        cueCount: row.cue_count,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at,
-        cues: safeParseCuesJson(row.cues_json),
-      }));
+      const userRows = await db.queryAll<Record<string, any>>(
+        `SELECT id, video_id, title, source_type, cues_json, cue_count, created_at, updated_at
+         FROM ${userSubTable}
+         WHERE user_id = ? AND video_id = ?
+         ORDER BY updated_at DESC LIMIT 20`,
+        [user.id, videoId]
+      );
+      personal = userRows.map(serializePersonalTrack);
     }
 
     sendJson(res, 200, { videoId, community, personal });
@@ -136,7 +146,7 @@ export async function handleSubtitleRoutes(
 
   // 2. Save personal subtitle for logged-in user (accessible to ALL logged-in accounts)
   if (pathname === '/api/subtitles/user' && method === 'POST') {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     if (!user) {
       sendJson(res, 401, { error: 'Vui lòng đăng nhập để lưu phụ đề vào tài khoản cá nhân.' });
       return true;
@@ -152,42 +162,31 @@ export async function handleSubtitleRoutes(
     }
 
     const cues = validateAndNormalizeCues(body.cues);
-    db.prepare(
-      `INSERT INTO user_subtitles (user_id, video_id, title, source_type, cues_json, cue_count, updated_at)
+    await db.execute(
+      `INSERT INTO ${userSubTable} (user_id, video_id, title, source_type, cues_json, cue_count, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(user_id, video_id, source_type) DO UPDATE SET
          title = excluded.title,
          cues_json = excluded.cues_json,
          cue_count = excluded.cue_count,
-         updated_at = CURRENT_TIMESTAMP`
-    ).run(user.id, videoId, title, sourceType, JSON.stringify(cues), cues.length);
+         updated_at = CURRENT_TIMESTAMP`,
+      [user.id, videoId, title, sourceType, JSON.stringify(cues), cues.length]
+    );
 
-    const saved = db
-      .prepare(
-        `SELECT id, video_id, title, source_type, cues_json, cue_count, created_at, updated_at
-         FROM user_subtitles WHERE user_id = ? AND video_id = ? AND source_type = ?`
-      )
-      .get(user.id, videoId, sourceType) as any;
+    const saved = (await db.queryOne<Record<string, any>>(
+      `SELECT id, video_id, title, source_type, cues_json, cue_count, created_at, updated_at
+       FROM ${userSubTable} WHERE user_id = ? AND video_id = ? AND source_type = ?`,
+      [user.id, videoId, sourceType]
+    )) as Record<string, any>;
 
-    sendJson(res, 200, {
-      track: {
-        id: saved.id,
-        videoId: saved.video_id,
-        title: saved.title,
-        sourceType: saved.source_type,
-        cueCount: saved.cue_count,
-        createdAt: saved.created_at,
-        updatedAt: saved.updated_at,
-        cues: safeParseCuesJson(saved.cues_json),
-      },
-    });
+    sendJson(res, 200, { track: serializePersonalTrack(saved) });
     return true;
   }
 
   // 3. Delete user's own personal subtitle
   const userDeleteMatch = pathname.match(/^\/api\/subtitles\/user\/([1-9]\d*)$/);
   if (userDeleteMatch && method === 'DELETE') {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     if (!user) {
       sendJson(res, 401, { error: 'Chưa đăng nhập.' });
       return true;
@@ -197,9 +196,10 @@ export async function handleSubtitleRoutes(
       sendJson(res, 400, { error: 'ID phụ đề không hợp lệ.' });
       return true;
     }
-    const info = db
-      .prepare('DELETE FROM user_subtitles WHERE id = ? AND user_id = ?')
-      .run(id, user.id);
+    const info = await db.execute(
+      `DELETE FROM ${userSubTable} WHERE id = ? AND user_id = ?`,
+      [id, user.id]
+    );
     if (!info.changes) {
       sendJson(res, 404, { error: 'Không tìm thấy bản phụ đề cá nhân này.' });
       return true;
@@ -210,7 +210,7 @@ export async function handleSubtitleRoutes(
 
   // 4. Publish Community Subtitle (ADMIN & AUTHORIZED CONTRIBUTOR ONLY)
   if (pathname === '/api/subtitles/community' && method === 'POST') {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     if (!user) {
       sendJson(res, 401, { error: 'Vui lòng đăng nhập trước.' });
       return true;
@@ -234,50 +234,26 @@ export async function handleSubtitleRoutes(
 
     const cues = validateAndNormalizeCues(body.cues);
     const authorName = sanitizeText(user.displayName || user.username, 80) || user.username;
-    const result = db
-      .prepare(
-        `INSERT INTO community_subtitles (video_id, title, source_type, author_id, author_name, cues_json, cue_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        videoId,
-        title,
-        sourceType,
-        user.id,
-        authorName,
-        JSON.stringify(cues),
-        cues.length
-      );
+    const insertedId = await db.insertReturningId(
+      `INSERT INTO ${communityTable} (video_id, title, source_type, author_id, author_name, cues_json, cue_count)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [videoId, title, sourceType, user.id, authorName, JSON.stringify(cues), cues.length]
+    );
 
-    const created = db
-      .prepare(
-        `SELECT id, video_id, title, source_type, author_id, author_name, cues_json, cue_count, created_at, updated_at
-         FROM community_subtitles WHERE id = ?`
-      )
-      .get(Number(result.lastInsertRowid)) as any;
+    const created = (await db.queryOne<Record<string, any>>(
+      `SELECT id, video_id, title, source_type, author_id, author_name, cues_json, cue_count, created_at, updated_at
+       FROM ${communityTable} WHERE id = ?`,
+      [insertedId]
+    )) as Record<string, any>;
 
-    sendJson(res, 201, {
-      track: {
-        id: created.id,
-        videoId: created.video_id,
-        title: created.title,
-        sourceType: created.source_type,
-        authorId: created.author_id,
-        authorName: created.author_name,
-        cueCount: created.cue_count,
-        reportCount: 0,
-        createdAt: created.created_at,
-        updatedAt: created.updated_at,
-        cues: safeParseCuesJson(created.cues_json),
-      },
-    });
+    sendJson(res, 201, { track: serializeCommunityTrack({ ...created, report_count: 0 }) });
     return true;
   }
 
   // 5. Update Community Subtitle (Admin or original Contributor author)
   const communityItemMatch = pathname.match(/^\/api\/subtitles\/community\/([1-9]\d*)$/);
   if (communityItemMatch && method === 'PUT') {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     if (!user || !canPublishCommunitySub(user)) {
       sendJson(res, 403, { error: 'Bạn không có quyền chỉnh sửa phụ đề cộng đồng.' });
       return true;
@@ -289,14 +265,15 @@ export async function handleSubtitleRoutes(
       return true;
     }
 
-    const existing = db
-      .prepare('SELECT id, author_id FROM community_subtitles WHERE id = ?')
-      .get(id) as { id: number; author_id: number } | undefined;
+    const existing = await db.queryOne<{ id: number; author_id: number | null }>(
+      `SELECT id, author_id FROM ${communityTable} WHERE id = ?`,
+      [id]
+    );
     if (!existing) {
       sendJson(res, 404, { error: 'Không tìm thấy bản phụ đề cộng đồng.' });
       return true;
     }
-    if (user.role !== 'admin' && existing.author_id !== user.id) {
+    if (user.role !== 'admin' && Number(existing.author_id) !== user.id) {
       sendJson(res, 403, { error: 'Chỉ Admin hoặc tác giả mới được sửa bản phụ đề này.' });
       return true;
     }
@@ -306,42 +283,30 @@ export async function handleSubtitleRoutes(
     const cues = validateAndNormalizeCues(body.cues);
 
     if (title) {
-      db.prepare(
-        `UPDATE community_subtitles SET title = ?, cues_json = ?, cue_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).run(title, JSON.stringify(cues), cues.length, id);
+      await db.execute(
+        `UPDATE ${communityTable} SET title = ?, cues_json = ?, cue_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [title, JSON.stringify(cues), cues.length, id]
+      );
     } else {
-      db.prepare(
-        `UPDATE community_subtitles SET cues_json = ?, cue_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-      ).run(JSON.stringify(cues), cues.length, id);
+      await db.execute(
+        `UPDATE ${communityTable} SET cues_json = ?, cue_count = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [JSON.stringify(cues), cues.length, id]
+      );
     }
 
-    const updated = db
-      .prepare(
-        `SELECT id, video_id, title, source_type, author_id, author_name, cues_json, cue_count, created_at, updated_at
-         FROM community_subtitles WHERE id = ?`
-      )
-      .get(id) as any;
+    const updated = (await db.queryOne<Record<string, any>>(
+      `SELECT id, video_id, title, source_type, author_id, author_name, cues_json, cue_count, created_at, updated_at
+       FROM ${communityTable} WHERE id = ?`,
+      [id]
+    )) as Record<string, any>;
 
-    sendJson(res, 200, {
-      track: {
-        id: updated.id,
-        videoId: updated.video_id,
-        title: updated.title,
-        sourceType: updated.source_type,
-        authorId: updated.author_id,
-        authorName: updated.author_name,
-        cueCount: updated.cue_count,
-        createdAt: updated.created_at,
-        updatedAt: updated.updated_at,
-        cues: safeParseCuesJson(updated.cues_json),
-      },
-    });
+    sendJson(res, 200, { track: serializeCommunityTrack(updated) });
     return true;
   }
 
   // 6. Delete Community Subtitle (Admin or original Contributor author)
   if (communityItemMatch && method === 'DELETE') {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     if (!user || !canPublishCommunitySub(user)) {
       sendJson(res, 403, { error: 'Bạn không có quyền xóa phụ đề cộng đồng.' });
       return true;
@@ -353,19 +318,20 @@ export async function handleSubtitleRoutes(
       return true;
     }
 
-    const existing = db
-      .prepare('SELECT id, author_id FROM community_subtitles WHERE id = ?')
-      .get(id) as { id: number; author_id: number } | undefined;
+    const existing = await db.queryOne<{ id: number; author_id: number | null }>(
+      `SELECT id, author_id FROM ${communityTable} WHERE id = ?`,
+      [id]
+    );
     if (!existing) {
       sendJson(res, 404, { error: 'Không tìm thấy bản phụ đề.' });
       return true;
     }
-    if (user.role !== 'admin' && existing.author_id !== user.id) {
+    if (user.role !== 'admin' && Number(existing.author_id) !== user.id) {
       sendJson(res, 403, { error: 'Chỉ Admin hoặc tác giả mới được xóa bản phụ đề này.' });
       return true;
     }
 
-    db.prepare('DELETE FROM community_subtitles WHERE id = ?').run(id);
+    await db.execute(`DELETE FROM ${communityTable} WHERE id = ?`, [id]);
     sendJson(res, 200, { ok: true });
     return true;
   }
@@ -373,7 +339,7 @@ export async function handleSubtitleRoutes(
   // 7. Report Faulty Community Subtitle (Any logged-in user)
   const reportMatch = pathname.match(/^\/api\/subtitles\/community\/([1-9]\d*)\/report$/);
   if (reportMatch && method === 'POST') {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     if (!user) {
       sendJson(res, 401, { error: 'Vui lòng đăng nhập để báo cáo lỗi phụ đề.' });
       return true;
@@ -383,9 +349,10 @@ export async function handleSubtitleRoutes(
       sendJson(res, 400, { error: 'ID phụ đề không hợp lệ.' });
       return true;
     }
-    const existing = db
-      .prepare('SELECT id FROM community_subtitles WHERE id = ?')
-      .get(id);
+    const existing = await db.queryOne<{ id: number }>(
+      `SELECT id FROM ${communityTable} WHERE id = ?`,
+      [id]
+    );
     if (!existing) {
       sendJson(res, 404, { error: 'Không tìm thấy bản phụ đề cộng đồng.' });
       return true;
@@ -395,11 +362,12 @@ export async function handleSubtitleRoutes(
     const reason =
       sanitizeText(body.reason, 500) || 'Sub bị lệch thời gian hoặc dịch sai nghiêm trọng';
 
-    db.prepare(
-      `INSERT INTO subtitle_reports (community_sub_id, user_id, reason)
+    await db.execute(
+      `INSERT INTO ${reportsTable} (community_sub_id, user_id, reason)
        VALUES (?, ?, ?)
-       ON CONFLICT(community_sub_id, user_id) DO UPDATE SET reason = excluded.reason, created_at = CURRENT_TIMESTAMP`
-    ).run(id, user.id, reason);
+       ON CONFLICT(community_sub_id, user_id) DO UPDATE SET reason = excluded.reason, created_at = CURRENT_TIMESTAMP`,
+      [id, user.id, reason]
+    );
 
     sendJson(res, 200, { ok: true });
     return true;

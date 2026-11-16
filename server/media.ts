@@ -550,13 +550,12 @@ export async function fetchAkaiwaSeries(slug: string, ep: number = 1) {
   };
 }
 
-function getStoredMnemonic(kanji: string) {
-  const db = getDb();
-  return db
-    .prepare('SELECT kanji, han_viet, decomposition, mnemonic FROM kanji_mnemonics WHERE kanji = ?')
-    .get(kanji) as
-    | { kanji: string; han_viet: string; decomposition: string; mnemonic: string }
-    | undefined;
+async function getStoredMnemonic(kanji: string) {
+  const db = await getDb();
+  return db.queryOne<{ kanji: string; han_viet: string; decomposition: string; mnemonic: string }>(
+    `SELECT kanji, han_viet, decomposition, mnemonic FROM ${db.table('kanji_mnemonics')} WHERE kanji = ?`,
+    [kanji]
+  );
 }
 
 export async function handleMediaRoutes(
@@ -813,7 +812,7 @@ export async function handleMediaRoutes(
     const cached = kanjiCache.get(cacheKey);
     if (cached) {
       if (type === 'kanji') {
-        const mn = getStoredMnemonic(cached.kanji || q);
+        const mn = await getStoredMnemonic(cached.kanji || q);
         sendJson(res, 200, mn ? { ...cached, decomposition: mn.decomposition, mnemonic: mn.mnemonic } : cached);
       } else {
         sendJson(res, 200, cached);
@@ -892,7 +891,7 @@ export async function handleMediaRoutes(
       return true;
     }
 
-    const storedMn = getStoredMnemonic(k.kanji || q);
+    const storedMn = await getStoredMnemonic(k.kanji || q);
     const result = {
       type: 'kanji',
       kanji: k.kanji || q,
@@ -920,13 +919,13 @@ export async function handleMediaRoutes(
       sendJson(res, 400, { error: 'Tham số kanji phải là đúng 1 chữ Hán hợp lệ.' });
       return true;
     }
-    const row = getStoredMnemonic(kanji);
+    const row = await getStoredMnemonic(kanji);
     sendJson(res, 200, { mnemonicData: row || null });
     return true;
   }
 
   if (pathname === '/api/kanji-mnemonic' && method === 'POST') {
-    const user = getAuthUser(req);
+    const user = await getAuthUser(req);
     if (!user) {
       sendJson(res, 401, { error: 'Vui lòng đăng nhập để đóng góp bộ nhớ Kanji.' });
       return true;
@@ -953,24 +952,21 @@ export async function handleMediaRoutes(
       return true;
     }
 
-    const db = getDb();
+    const db = await getDb();
+    const mnemonicsTable = db.table('kanji_mnemonics');
     const isPrivileged = canPublishCommunitySub(user);
     // Regular users may only populate missing mnemonics (prevents overwriting shared cache)
-    const stmt = isPrivileged
-      ? db.prepare(`
-          INSERT INTO kanji_mnemonics (kanji, han_viet, decomposition, mnemonic, updated_at)
-          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-          ON CONFLICT(kanji) DO UPDATE SET
-            han_viet = CASE WHEN excluded.han_viet != '' THEN excluded.han_viet ELSE kanji_mnemonics.han_viet END,
-            decomposition = excluded.decomposition,
-            mnemonic = excluded.mnemonic,
-            updated_at = CURRENT_TIMESTAMP
-        `)
-      : db.prepare(`
-          INSERT INTO kanji_mnemonics (kanji, han_viet, decomposition, mnemonic, updated_at)
-          VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-          ON CONFLICT(kanji) DO NOTHING
-        `);
+    const upsertSql = isPrivileged
+      ? `INSERT INTO ${mnemonicsTable} (kanji, han_viet, decomposition, mnemonic, updated_at)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(kanji) DO UPDATE SET
+           han_viet = CASE WHEN excluded.han_viet != '' THEN excluded.han_viet ELSE ${mnemonicsTable}.han_viet END,
+           decomposition = excluded.decomposition,
+           mnemonic = excluded.mnemonic,
+           updated_at = CURRENT_TIMESTAMP`
+      : `INSERT INTO ${mnemonicsTable} (kanji, han_viet, decomposition, mnemonic, updated_at)
+         VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(kanji) DO NOTHING`;
 
     let savedCount = 0;
     for (const item of body.items) {
@@ -981,7 +977,7 @@ export async function handleMediaRoutes(
       const m = sanitizeText(item.mnemonic || '', 500);
       if (!d && !m) continue;
       const hv = sanitizeText(item.hanViet || '', 64).toUpperCase();
-      stmt.run(k, hv, d, m);
+      await db.execute(upsertSql, [k, hv, d, m]);
       savedCount++;
     }
 

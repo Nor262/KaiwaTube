@@ -82,11 +82,13 @@ export function parsePositiveIntId(raw: string | undefined): number | null {
 }
 
 export function getClientIp(req: IncomingMessage): string {
-  const trustProxy = process.env.TRUST_PROXY === '1';
+  const trustProxy = process.env.TRUST_PROXY === '1' || process.env.VERCEL === '1';
   if (trustProxy) {
     const xff = req.headers['x-forwarded-for'];
     const first = Array.isArray(xff) ? xff[0] : xff?.split(',')[0];
     if (first && first.trim()) return first.trim();
+    const realIp = req.headers['x-real-ip'];
+    if (typeof realIp === 'string' && realIp.trim()) return realIp.trim();
   }
   return req.socket?.remoteAddress || 'unknown';
 }

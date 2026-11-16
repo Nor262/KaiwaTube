@@ -115,10 +115,12 @@ export function createProdRequestHandler(distDir = resolveDistDir()) {
         return;
       }
       try {
-        getDb().prepare('SELECT 1 AS ok').get();
+        const db = await getDb();
+        await db.healthCheck();
         const payload = {
           ok: true,
           db: 'connected',
+          dialect: db.dialect,
           uptimeSec: Math.floor(process.uptime()),
         };
         if (method === 'HEAD') {
@@ -234,15 +236,15 @@ function startCliServer(): void {
     console.log(`[KaiwaTube] Received ${signal}, shutting down cleanly...`);
 
     const forceTimer = setTimeout(() => {
-      closeDb();
-      process.exit(1);
+      void closeDb().finally(() => process.exit(1));
     }, 8_000);
     forceTimer.unref();
 
     server.close(() => {
-      closeDb();
-      clearTimeout(forceTimer);
-      process.exit(0);
+      void closeDb().finally(() => {
+        clearTimeout(forceTimer);
+        process.exit(0);
+      });
     });
   };
 
