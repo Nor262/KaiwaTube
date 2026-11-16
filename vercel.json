@@ -11,11 +11,15 @@
   },
   "rewrites": [
     {
+      "source": "/favicon.ico",
+      "destination": "/favicon.svg"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "/api/index?__kaiwa_path=$1"
     },
     {
-      "source": "/((?!api/|assets/|favicon\\.ico).*)",
+      "source": "/((?!api/|assets/|favicon\\.).*)",
       "destination": "/index.html"
     }
   ],

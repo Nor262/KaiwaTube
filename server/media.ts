@@ -158,9 +158,14 @@ function extractOverlayBadgeText(overlays: any[]): string {
 }
 
 async function searchYouTubeNative(q: string) {
-  const data = await fetchYtInitialData(
-    `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}&hl=en`
-  );
+  const [videoPageSettled, playlistPageSettled] = await Promise.allSettled([
+    fetchYtInitialData(
+      `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}&hl=en`
+    ),
+    fetchYtInitialData(
+      `https://www.youtube.com/results?search_query=${encodeURIComponent(q)}&sp=EgIQAw%253D%253D&hl=en`
+    ),
+  ]);
 
   const seenVid = new Set<string>();
   const seenList = new Set<string>();
@@ -263,14 +268,34 @@ async function searchYouTubeNative(q: string) {
     }
   };
 
-  walk(data);
+  if (videoPageSettled.status === 'fulfilled') {
+    walk(videoPageSettled.value);
+  }
+  if (playlistPageSettled.status === 'fulfilled') {
+    walk(playlistPageSettled.value);
+  }
 
-  if (videos.length === 0 && playlists.length === 0) {
-    const result = await yts(q);
-    return {
-      videos: (result.videos || []).slice(0, 24).map(mapYtsVideoItem),
-      playlists: (result.playlists || []).slice(0, 12).map(mapYtsPlaylistItem),
-    };
+  // Merge yt-search results whenever native HTML returns sparse items or zero playlists
+  if (videos.length < 10 || playlists.length === 0) {
+    try {
+      const result = await yts(q);
+      for (const item of (result.videos || []).map(mapYtsVideoItem)) {
+        if (item.videoId && !seenVid.has(item.videoId)) {
+          seenVid.add(item.videoId);
+          videos.push(item);
+        }
+        if (videos.length >= 24) break;
+      }
+      for (const pl of (result.playlists || []).map(mapYtsPlaylistItem)) {
+        if (pl.listId && !seenList.has(pl.listId)) {
+          seenList.add(pl.listId);
+          playlists.push(pl);
+        }
+        if (playlists.length >= 12) break;
+      }
+    } catch {
+      // Best-effort supplement from yt-search
+    }
   }
 
   return {
@@ -599,10 +624,13 @@ export async function handleMediaRoutes(
     }
     const cues = await fetchFullYouTubeSubtitles(videoId);
     if (!cues || !cues.length) {
+      const errorMsg =
+        process.env.VERCEL === '1'
+          ? 'Không lấy được phụ đề CC tự động từ YouTube (video không có CC hoặc YouTube chặn IP server cloud Vercel). Hãy nạp file .SRT/.VTT hoặc chọn phụ đề cộng đồng.'
+          : 'Video YouTube này không có phụ đề (CC). Hãy nạp file .SRT/.VTT hoặc chọn video khác.';
       sendJson(res, 200, {
         cues: [],
-        error:
-          'Video YouTube này không có phụ đề (CC). Hãy nạp file .SRT/.VTT hoặc chọn video khác.',
+        error: errorMsg,
       });
       return true;
     }
@@ -778,26 +806,30 @@ export async function handleMediaRoutes(
       sendJson(res, 400, { error: 'videoId không hợp lệ.' });
       return true;
     }
-    try {
-      const v = await yts({ videoId });
-      sendJson(res, 200, {
-        videoId: isValidYouTubeVideoId(v.videoId) ? v.videoId : videoId,
-        title: v.title || `Video (${videoId})`,
-        thumbnail:
-          isSafeHttpUrl(v.thumbnail || v.image) ||
-          `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
-        duration: v.timestamp || '',
-        author: v.author?.name || '',
-      });
-    } catch {
-      sendJson(res, 200, {
-        videoId,
-        title: `Video (${videoId})`,
-        thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
-        duration: '',
-        author: '',
-      });
-    }
+    const [ytsRes, oembedRes] = await Promise.allSettled([
+      yts({ videoId }),
+      fetchWithTimeout(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(
+          `https://www.youtube.com/watch?v=${videoId}`
+        )}&format=json`,
+        {},
+        8_000
+      ).then((r) => (r.ok ? r.json() : null)),
+    ]);
+
+    const v = ytsRes.status === 'fulfilled' ? ytsRes.value : null;
+    const oe = oembedRes.status === 'fulfilled' ? (oembedRes.value as any) : null;
+
+    sendJson(res, 200, {
+      videoId: isValidYouTubeVideoId(v?.videoId) ? v.videoId : videoId,
+      title: v?.title || sanitizeText(oe?.title || '', 200) || `Video (${videoId})`,
+      thumbnail:
+        isSafeHttpUrl(v?.thumbnail || v?.image) ||
+        isSafeHttpUrl(oe?.thumbnail_url) ||
+        `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
+      duration: v?.timestamp || '',
+      author: v?.author?.name || sanitizeText(oe?.author_name || '', 120) || '',
+    });
     return true;
   }
 
